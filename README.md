@@ -100,6 +100,14 @@ The jar lands in `build/libs/sidedrain-1.0.0.jar`. Requires JDK 17.
 
 ---
 
+## Links
+
+- **Repository:** https://github.com/zhazonglx/side-drain
+- **Releases:** https://github.com/zhazonglx/side-drain/releases
+- **Issues:** https://github.com/zhazonglx/side-drain/issues
+
+---
+
 ## License
 
 MIT. See `LICENSE.txt`.
