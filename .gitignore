@@ -1,0 +1,39 @@
+# eclipse
+bin
+*.launch
+.settings
+.metadata
+.classpath
+.project
+
+# idea
+out
+*.ipr
+*.iws
+*.iml
+.idea
+
+# gradle
+build
+.gradle
+
+# other
+eclipse
+run
+
+# Files from Forge MDK
+forge*changelog.txt
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Release staging helpers (generated, not source)
+release/*.py
+
+# Scratch probes and caches from development
+__cls/
+__pycache__/
+*.pyc
+*.class
+build.log

@@ -1,0 +1,5 @@
+{
+  "variants": {
+    "": { "model": "sidedrain:block/rotated_block" }
+  }
+}

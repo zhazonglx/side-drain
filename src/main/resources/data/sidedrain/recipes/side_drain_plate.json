@@ -1,0 +1,15 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    "R R",
+    " C ",
+    "R R"
+  ],
+  "key": {
+    "R": { "item": "minecraft:redstone" },
+    "C": { "item": "minecraft:chest" }
+  },
+  "result": {
+    "item": "sidedrain:side_drain_plate"
+  }
+}

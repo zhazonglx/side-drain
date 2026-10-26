@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "facing=up":    { "model": "sidedrain:block/standing_redstone_up" },
+    "facing=down":  { "model": "sidedrain:block/standing_redstone_down" },
+    "facing=north": { "model": "sidedrain:block/standing_redstone_north" },
+    "facing=south": { "model": "sidedrain:block/standing_redstone_south" },
+    "facing=east":  { "model": "sidedrain:block/standing_redstone_east" },
+    "facing=west":  { "model": "sidedrain:block/standing_redstone_west" }
+  }
+}

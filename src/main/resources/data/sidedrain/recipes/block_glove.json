@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    "R R",
+    "DIL",
+    "R R"
+  ],
+  "key": {
+    "R": { "item": "minecraft:redstone" },
+    "D": { "item": "minecraft:dirt" },
+    "I": { "item": "minecraft:iron_ingot" },
+    "L": { "tag": "minecraft:logs" }
+  },
+  "result": {
+    "item": "sidedrain:block_glove"
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "variants": {
+    "facing=up_down": {
+      "model": "sidedrain:block/hopper_up_down"
+    },
+    "facing=up_north": {
+      "model": "sidedrain:block/hopper_up_north"
+    },
+    "facing=up_south": {
+      "model": "sidedrain:block/hopper_up_south"
+    },
+    "facing=up_east": {
+      "model": "sidedrain:block/hopper_up_east"
+    },
+    "facing=up_west": {
+      "model": "sidedrain:block/hopper_up_west"
+    },
+    "facing=down_up": {
+      "model": "sidedrain:block/hopper_down_up"
+    },
+    "facing=down_north": {
+      "model": "sidedrain:block/hopper_down_north"
+    },
+    "facing=down_south": {
+      "model": "sidedrain:block/hopper_down_south"
+    },
+    "facing=down_east": {
+      "model": "sidedrain:block/hopper_down_east"
+    },
+    "facing=down_west": {
+      "model": "sidedrain:block/hopper_down_west"
+    },
+    "facing=north_up": {
+      "model": "sidedrain:block/hopper_north_up"
+    },
+    "facing=north_down": {
+      "model": "sidedrain:block/hopper_north_down"
+    },
+    "facing=north_south": {
+      "model": "sidedrain:block/hopper_north_south"
+    },
+    "facing=north_east": {
+      "model": "sidedrain:block/hopper_north_east"
+    },
+    "facing=north_west": {
+      "model": "sidedrain:block/hopper_north_west"
+    },
+    "facing=south_up": {
+      "model": "sidedrain:block/hopper_south_up"
+    },
+    "facing=south_down": {
+      "model": "sidedrain:block/hopper_south_down"
+    },
+    "facing=south_north": {
+      "model": "sidedrain:block/hopper_south_north"
+    },
+    "facing=south_east": {
+      "model": "sidedrain:block/hopper_south_east"
+    },
+    "facing=south_west": {
+      "model": "sidedrain:block/hopper_south_west"
+    },
+    "facing=east_up": {
+      "model": "sidedrain:block/hopper_east_up"
+    },
+    "facing=east_down": {
+      "model": "sidedrain:block/hopper_east_down"
+    },
+    "facing=east_north": {
+      "model": "sidedrain:block/hopper_east_north"
+    },
+    "facing=east_south": {
+      "model": "sidedrain:block/hopper_east_south"
+    },
+    "facing=east_west": {
+      "model": "sidedrain:block/hopper_east_west"
+    },
+    "facing=west_up": {
+      "model": "sidedrain:block/hopper_west_up"
+    },
+    "facing=west_down": {
+      "model": "sidedrain:block/hopper_west_down"
+    },
+    "facing=west_north": {
+      "model": "sidedrain:block/hopper_west_north"
+    },
+    "facing=west_south": {
+      "model": "sidedrain:block/hopper_west_south"
+    },
+    "facing=west_east": {
+      "model": "sidedrain:block/hopper_west_east"
+    }
+  }
+}

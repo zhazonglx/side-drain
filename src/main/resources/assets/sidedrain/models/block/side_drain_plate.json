@@ -1,0 +1,23 @@
+{
+  "ambientocclusion": false,
+  "textures": {
+    "particle": "sidedrain:block/side_drain_plate",
+    "outer": "sidedrain:block/side_drain_plate",
+    "inner": "sidedrain:block/side_drain_plate_inner",
+    "edge": "sidedrain:block/side_drain_plate_edge"
+  },
+  "elements": [
+    {
+      "from": [0, 0, 13],
+      "to": [16, 16, 16],
+      "faces": {
+        "north": { "texture": "#outer" },
+        "south": { "texture": "#inner", "cullface": "south" },
+        "up":    { "texture": "#edge" },
+        "down":  { "texture": "#edge" },
+        "east":  { "texture": "#edge" },
+        "west":  { "texture": "#edge" }
+      }
+    }
+  ]
+}
