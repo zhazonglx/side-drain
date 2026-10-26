@@ -35,6 +35,9 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 public final class ShapeRotator {
     private static final double S = 16.0D;
 
+    /** The block centre every rotation turns about, in block units. */
+    private static final double CENTRE = 0.5D;
+
     /** Bounded so a world full of distinct modded shapes cannot grow the cache without limit. */
     private static final int CACHE_LIMIT = 2048;
 
@@ -336,9 +339,11 @@ public final class ShapeRotator {
         // Counter-clockwise so the polygon clipper below sees a consistent winding.
         int[][] order = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
         for (int[] o : order) {
-            double dy = ys[o[0]] - 0.5D;
-            double dz = zs[o[1]] - 0.5D;
-            corners.add(new double[]{dy * cos - dz * sin + 0.5D, dy * sin + dz * cos + 0.5D});
+            // Shapes arrive in block units (0..1), so the centre is 0.5. The pixel constant S is
+            // only used inside rebuild(), which converts on the way in and back on the way out.
+            double dy = ys[o[0]] - CENTRE;
+            double dz = zs[o[1]] - CENTRE;
+            corners.add(new double[]{dy * cos - dz * sin + CENTRE, dy * sin + dz * cos + CENTRE});
         }
         return corners;
     }
@@ -350,9 +355,9 @@ public final class ShapeRotator {
         java.util.List<double[]> corners = new java.util.ArrayList<>(4);
         int[][] order = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
         for (int[] o : order) {
-            double dx = xs[o[0]] - 0.5D;
-            double dz = zs[o[1]] - 0.5D;
-            corners.add(new double[]{dx * cos + dz * sin + 0.5D, -dx * sin + dz * cos + 0.5D});
+            double dx = xs[o[0]] - CENTRE;
+            double dz = zs[o[1]] - CENTRE;
+            corners.add(new double[]{dx * cos + dz * sin + CENTRE, -dx * sin + dz * cos + CENTRE});
         }
         return corners;
     }
