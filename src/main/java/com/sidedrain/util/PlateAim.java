@@ -47,7 +47,7 @@ public final class PlateAim {
 
     private static final Map<Key, VoxelShape> SHAPES = new ConcurrentHashMap<>();
 
-    private record Key(Direction facing, int tilt) {
+    private record Key(Direction facing, int tilt, int spin) {
     }
 
     /** The coarse y rotation the blockstate applies for this facing. */
@@ -83,42 +83,74 @@ public final class PlateAim {
      * facing vector instead would send an east plate's items south.
      */
     public static Vec3 ejectDirection(Direction facing, int tilt) {
-        // The authored outward normal. The models are authored for a north (or up, or down) plate and
-        // the blockstate only turns them onto their face afterwards, so the same order has to be used
-        // here: tilt first, face turn second.
-        Vec3 authored = switch (facing) {
+        return ejectDirection(facing, tilt, 0);
+    }
+
+    /**
+     * The direction items leave the plate with both aim rings applied.
+     *
+     * <p>The vector is produced by transforming the authored nozzle normal through the <b>same JOML
+     * matrix</b> the dynamic render model applies to the slab's quads. Deriving the direction by
+     * hand-written trigonometry is exactly what drifted: JOML's {@code rotateY(+90)} maps north to
+     * west - the opposite sign of the naive textbook convention - so a hand-rolled {@code Ry(-yaw)}
+     * sent an east plate's items into its container and mirrored the x component of every
+     * tilt-plus-spin combination. One matrix, three consumers: what the player sees, what they bump
+     * into and where the items go can no longer disagree.
+     */
+    public static Vec3 ejectDirection(Direction facing, int tilt, int spin) {
+        return transformNormal(facing, tilt, spin, authoredNormal(facing));
+    }
+
+    /** The nozzle normal the flat slab is authored with, per model family. */
+    private static Vec3 authoredNormal(Direction facing) {
+        return switch (facing) {
             case UP -> new Vec3(0.0D, 1.0D, 0.0D);
             case DOWN -> new Vec3(0.0D, -1.0D, 0.0D);
             default -> new Vec3(0.0D, 0.0D, -1.0D);
         };
-        int steps = Math.floorMod(tilt, STEPS);
-        // Exactly the same composed transform the collision box uses: Rx(tilt) then Ry(yaw). Deriving
-        // the direction from the same two angles is what guarantees the items leave along the normal
-        // of the slanted face rather than along the old vertical one - the direction used to be
-        // computed with a separate hand-written path that could drift from the shape.
-        Vec3 tilted = steps == 0 ? authored : rotateX(authored, steps * (double) STEP_DEGREES);
-        // Same negated yaw as the shape above, for the same reason: this must describe the identical
-        // transform, or items fly out of a face the plate is not pointing at.
-        return rotateY(tilted, -yaw(facing)).normalize();
+    }
+
+    /**
+     * Transforms {@code normal} by the model transform for this aim, returning the unit aim vector.
+     *
+     * <p>Keep this matrix literally identical to {@code PlateAimModel.buildTransform} - same axis
+     * objects, same signs, same order. The comment there says why the order matters.
+     */
+    private static Vec3 transformNormal(Direction facing, int tilt, int spin, Vec3 normal) {
+        org.joml.Matrix4f matrix = new org.joml.Matrix4f();
+        matrix.translate(0.5F, 0.5F, 0.5F);
+        matrix.rotate(com.mojang.math.Axis.YP.rotationDegrees(
+                spin * (float) STEP_DEGREES - yaw(facing)));
+        matrix.rotate(com.mojang.math.Axis.XP.rotationDegrees(tilt * (float) STEP_DEGREES));
+        matrix.translate(-0.5F, -0.5F, -0.5F);
+        org.joml.Vector3f rotated = new org.joml.Matrix3f(matrix)
+                .transform(new org.joml.Vector3f((float) normal.x, (float) normal.y, (float) normal.z));
+        return new Vec3(rotated.x(), rotated.y(), rotated.z()).normalize();
     }
 
     /** The collision and outline box of a plate with this facing and aim. */
     public static VoxelShape shape(Direction facing, int tilt) {
+        return shape(facing, tilt, 0);
+    }
+
+    /** The collision and outline box of a plate with both aim rings applied. */
+    public static VoxelShape shape(Direction facing, int tilt, int spin) {
         int steps = Math.floorMod(tilt, STEPS);
-        Key key = new Key(facing, steps);
+        int spinSteps = Math.floorMod(spin, STEPS);
+        Key key = new Key(facing, steps, spinSteps);
         VoxelShape cached = SHAPES.get(key);
         if (cached != null) {
             return cached;
         }
-        VoxelShape built = build(facing, steps);
-        if (SHAPES.size() > 64) {
+        VoxelShape built = build(facing, steps, spinSteps);
+        if (SHAPES.size() > 256) {
             SHAPES.clear();
         }
         SHAPES.put(key, built);
         return built;
     }
 
-    private static VoxelShape build(Direction facing, int steps) {
+    private static VoxelShape build(Direction facing, int steps, int spinSteps) {
         VoxelShape base = switch (facing) {
             case UP -> BASE_UP;
             case DOWN -> BASE_DOWN;
@@ -142,10 +174,23 @@ public final class PlateAim {
         // (the rotation is its own inverse there) and a full 90 degrees on east and west. Verified
         // numerically over all 16 (facing, tilt) pairs - +yaw mismatches 8 of them by 9.19 blocks
         // in model units, -yaw matches all 16 exactly.
-        return ShapeRotator.rotateAboutXY(base, steps * (double) STEP_DEGREES, -yaw(facing));
+        //
+        // Convention, settled by the SlabProbe/ShapeProbe pair: ShapeRotator follows the SAME
+        // right-handed convention as JOML's Axis.YP/Axis.XP - rotateAboutY(-90) moves a +Z slab to
+        // -X exactly as the render matrix does. So the shape takes the angles UNCHANGED: tilt*45
+        // about x, then spin*45 - yaw about y. Negating them here was the earlier "collision box
+        // spins the opposite way from the model" report, and the probes settle it definitively:
+        // both consumers share one convention, so both get the same numbers.
+        return ShapeRotator.rotateAboutXY(base, steps * (double) STEP_DEGREES,
+                spinSteps * (double) STEP_DEGREES - yaw(facing));
     }
 
-    // --- rotation primitives, matching Minecraft's block model convention -----------------------
+    // --- rotation primitives, kept only for reference ------------------------------------------
+    //
+    // The aim vector and the collision shape now both go through the JOML matrix, so these
+    // hand-written helpers have no caller left. They stay as documentation of the convention that
+    // caused the drift: both follow the textbook right-handed convention, which is the opposite
+    // sign of JOML's Axis.YP/Axis.XP that the render model uses.
 
     /** {@code Ry(deg)} about the block centre. */
     private static Vec3 rotateY(Vec3 v, double degrees) {

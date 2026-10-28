@@ -72,18 +72,38 @@ public final class ProjectileLauncher {
      * Everything that is not ammunition is allowed as well, because modded guns and wands are plain
      * items and the player should be able to try them. An item that cannot shoot does nothing.
      */
-    public static boolean isLauncher(ItemStack stack) {
+    /** True when the weapon stack is a bow or a crossbow, which fire real arrows. */
+    public static boolean isArchery(ItemStack weapon) {
+        return weapon.is(Items.BOW) || weapon.is(Items.CROSSBOW);
+    }
+
+    /** True when the weapon carries Infinity, which means no round is ever consumed. */
+    public static boolean hasInfinity(ItemStack weapon) {
+        return level(weapon, net.minecraft.world.item.enchantment.Enchantments.INFINITY_ARROWS) > 0;
+    }
+
+    /**
+     * True when the weapon slot holds something the plate can drive as a ranged weapon.
+     *
+     * <p>This is deliberately broad. A bow or a crossbow is the obvious case; a modded staff, a
+     * spell book or a gun usually arrives as a plain item with no base-game class this mod could
+     * name, so the last line accepts every non-ammunition item that is not obviously something
+     * else. The cost of accepting too much is that the plate may fire a useless object; the cost of
+     * accepting too little is that the pack's own ranged weapons are silently ignored, which was
+     * exactly the "cannot use my weapons" report.
+     */
+    public static boolean isRangedWeapon(ItemStack stack) {
         if (stack.isEmpty() || isAmmo(stack)) {
             return false;
         }
-        if (stack.is(Items.BOW) || stack.is(Items.CROSSBOW) || stack.is(Items.TRIDENT)) {
-            return true;
+        // Melee weapons are the melee path's job, not the launcher's.
+        if (com.sidedrain.util.MeleeAttacker.isMelee(stack)) {
+            return false;
         }
+        // Blocks are launchers only when they actually dispense (dispenser, dropper).
         if (stack.getItem() instanceof net.minecraft.world.item.BlockItem blockItem) {
             Block block = blockItem.getBlock();
-            if (block == Blocks.DISPENSER || block == Blocks.DROPPER) {
-                return true;
-            }
+            return block == Blocks.DISPENSER || block == Blocks.DROPPER;
         }
         return true;
     }
@@ -91,24 +111,76 @@ public final class ProjectileLauncher {
     /**
      * Fires {@code ammo} out of the plate once.
      *
+     * @param aim      the exact direction the plate's nozzle points, 45 degree steps included
      * @param strategy the plate's picking strategy, so the firing pattern follows the same idea
      * @return true when a projectile actually left the plate
      */
-    public static boolean fire(Level level, BlockPos pos, Direction facing, ItemStack weapon, ItemStack ammo,
+    public static boolean fire(Level level, BlockPos pos, Vec3 aim, ItemStack weapon, ItemStack ammo,
                                int strategy, NonNullList<ItemStack> filter) {
+        return fire(level, pos, null, aim, weapon, ammo, strategy, filter);
+    }
+
+    /**
+     * Fires from an explicit muzzle point.
+     *
+     * @param muzzle the exact point the projectile should appear at, or {@code null} to derive it
+     *               from the block cell. A placed plate passes {@code null} and keeps the old
+     *               centre-of-cell offset; a carried plate passes the shooter's eye-height firing
+     *               point, because a carried plate has no cell and the derived origin was the
+     *               player's feet - which is why its shots came out far too low.
+     */
+    public static boolean fire(Level level, BlockPos pos, @Nullable Vec3 muzzle, Vec3 aim,
+                               ItemStack weapon, ItemStack ammo, int strategy,
+                               NonNullList<ItemStack> filter) {
         if (!(level instanceof ServerLevel serverLevel) || ammo.isEmpty()) {
             return false;
         }
-        Vec3 origin = Vec3.atCenterOf(pos).add(facing.getStepX() * 0.75D, facing.getStepY() * 0.75D,
-                facing.getStepZ() * 0.75D);
-        Entity projectile = spawn(serverLevel, origin, ammo);
-        if (projectile == null) {
-            return false;
+        // A bow or a crossbow fires a real arrow through the weapon's own ballistics, with the
+        // weapon's enchantments folded in by aim() - including Infinity, which is what keeps the
+        // plate from eating a round per shot on an enchanted bow.
+        boolean archery = isArchery(weapon);
+        // The muzzle is the caller's if it has one, otherwise the plate's own cell pushed out along
+        // the aim. It is the same point eject() uses, so a plate's items and its arrows always leave
+        // from one place.
+        Vec3 origin = muzzle != null ? muzzle
+                : Vec3.atCenterOf(pos).add(aim.x * 0.65D, aim.y * 0.65D, aim.z * 0.65D);
+        int multishot = archery ? level(weapon, net.minecraft.world.item.enchantment.Enchantments.MULTISHOT) : 0;
+        int shots = multishot > 0 ? 3 : 1;
+        boolean firedAny = false;
+        for (int shot = 0; shot < shots; shot++) {
+            // Multishot fans the three arrows out the way the crossbow does: one straight, two at
+            // ten degrees to either side in the horizontal plane.
+            Vec3 shotAim = aim;
+            if (shots > 1) {
+                double fan = (shot - (shots - 1) / 2.0D) * 10.0D;
+                double rad = Math.toRadians(fan);
+                double cos = Math.cos(rad), sin = Math.sin(rad);
+                Vec3 perpendicular = new Vec3(-aim.z, 0.0D, aim.x).normalize();
+                shotAim = new Vec3(
+                        aim.x * cos + perpendicular.x * sin,
+                        aim.y,
+                        aim.z * cos + perpendicular.z * sin).normalize();
+            }
+            Entity projectile = spawn(serverLevel, origin, ammo);
+            if (projectile == null) {
+                continue;
+            }
+            aim(projectile, shotAim, weapon, strategy);
+            if (projectile instanceof AbstractArrow arrow) {
+                // The plate is the shooter of record for these, so the arrow inherits the
+                // projectile default of "can be picked up" only when it is not an Infinity arrow -
+                // an Infinity arrow on the ground would let the arrow be duplicated.
+                if (hasInfinity(weapon)) {
+                    arrow.pickup = AbstractArrow.Pickup.CREATIVE_ONLY;
+                }
+            }
+            serverLevel.addFreshEntity(projectile);
+            firedAny = true;
         }
-        aim(projectile, facing, weapon, strategy);
-        serverLevel.addFreshEntity(projectile);
-        serverLevel.levelEvent(1002, pos, 0);
-        return true;
+        if (firedAny) {
+            serverLevel.levelEvent(1002, pos, 0);
+        }
+        return firedAny;
     }
 
     @Nullable
@@ -218,20 +290,28 @@ public final class ProjectileLauncher {
      * sharpness-style attack bonus from a modded weapon is folded into the arrow's base damage. This
      * is what makes an enchanted bow on a plate behave like an enchanted bow in your hands.
      */
-    private static void aim(Entity projectile, Direction facing, ItemStack weapon, int strategy) {
-        boolean archery = weapon.is(Items.BOW) || weapon.is(Items.CROSSBOW);
+    /**
+     * Aims the projectile the way the weapon would, and copies the weapon's own properties onto it.
+     *
+     * <p>The weapon's enchantments, its attack damage modifiers and its custom name all carry over:
+     * Power makes the arrow hit harder, Flame sets it alight, Punch knocks the target back, and a
+     * sharpness-style attack bonus from a modded weapon is folded into the arrow's base damage. This
+     * is what makes an enchanted bow on a plate behave like an enchanted bow in your hands.
+     *
+     * @param aim the exact direction to fly along, 45 degree steps included
+     */
+    private static void aim(Entity projectile, Vec3 aim, ItemStack weapon, int strategy) {
+        boolean archery = isArchery(weapon);
         double power = archery ? 2.4D : 1.4D;
         // A little spread, larger for the random strategy so the pattern visibly differs.
         double spread = strategy == 0 ? 0.08D : 0.02D;
-        double vx = facing.getStepX() + (Math.random() - 0.5D) * spread;
-        double vy = facing.getStepY() + (Math.random() - 0.5D) * spread;
-        double vz = facing.getStepZ() + (Math.random() - 0.5D) * spread;
-        if (archery) {
-            vy += 0.12D;
-        }
-        projectile.setDeltaMovement(vx * power, vy * power, vz * power);
+        Vec3 dir = new Vec3(
+                aim.x + (Math.random() - 0.5D) * spread,
+                aim.y + (Math.random() - 0.5D) * spread + (archery ? 0.12D : 0.0D),
+                aim.z + (Math.random() - 0.5D) * spread).normalize();
+        projectile.setDeltaMovement(dir.x * power, dir.y * power, dir.z * power);
         if (projectile instanceof FireworkRocketEntity firework) {
-            firework.setDeltaMovement(vx * 0.6D, vy * 0.6D + 0.15D, vz * 0.6D);
+            firework.setDeltaMovement(dir.x * 0.6D, dir.y * 0.6D + 0.15D, dir.z * 0.6D);
         }
         applyWeaponProperties(projectile, weapon, archery);
     }

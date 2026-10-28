@@ -55,9 +55,21 @@ public class SideDrainBlock extends BaseEntityBlock {
      */
     public static final IntegerProperty TILT = IntegerProperty.create("tilt", 0, PlateAim.STEPS - 1);
 
+    /**
+     * The horizontal aim of the plate's nozzle, in 45 degree steps about the vertical axis.
+     *
+     * <p>This is the second of the two aim rings the wrench drives: the tilt ring swings the nozzle
+     * up and down, this ring swings it left and right. Together they cover the full sphere at 45
+     * degree resolution, which is what "flipping in every direction" asks for. Like the tilt, it
+     * never changes which face the plate is clamped onto - only where it points - so every piece of
+     * container logic stays untouched.
+     */
+    public static final IntegerProperty SPIN = IntegerProperty.create("spin", 0, PlateAim.STEPS - 1);
+
     /** Convenience: the whole aim of a placed plate. */
     public static Vec3 ejectDirection(BlockState state) {
-        return PlateAim.ejectDirection(state.getValue(FACING), state.getValue(TILT));
+        return PlateAim.ejectDirection(state.getValue(FACING), state.getValue(TILT),
+                state.getValue(SPIN));
     }
 
     /** Convenience: the aim in whole 45 degree steps. */
@@ -69,22 +81,23 @@ public class SideDrainBlock extends BaseEntityBlock {
         super(Block.Properties.of().strength(2.5F, 6.0F).noOcclusion());
         this.registerDefaultState(this.stateDefinition.any()
                 .setValue(FACING, Direction.NORTH)
-                .setValue(TILT, 0));
+                .setValue(TILT, 0)
+                .setValue(SPIN, 0));
     }
 
     @Override
     protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> builder) {
-        builder.add(FACING, TILT);
+        builder.add(FACING, TILT, SPIN);
     }
 
     @Override
     public VoxelShape getShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext context) {
-        return PlateAim.shape(state.getValue(FACING), state.getValue(TILT));
+        return PlateAim.shape(state.getValue(FACING), state.getValue(TILT), state.getValue(SPIN));
     }
 
     @Override
     public VoxelShape getCollisionShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext context) {
-        return PlateAim.shape(state.getValue(FACING), state.getValue(TILT));
+        return PlateAim.shape(state.getValue(FACING), state.getValue(TILT), state.getValue(SPIN));
     }
 
     @Override

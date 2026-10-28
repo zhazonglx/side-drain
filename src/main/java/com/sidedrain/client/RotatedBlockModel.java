@@ -13,12 +13,10 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.block.model.ItemOverrides;
-import net.minecraft.client.renderer.block.model.ItemTransforms;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.client.resources.model.ModelBaker;
 import net.minecraft.client.resources.model.ModelState;
-import net.minecraft.client.resources.model.UnbakedModel;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.RandomSource;
@@ -34,7 +32,6 @@ import net.minecraftforge.client.model.geometry.IUnbakedGeometry;
 import org.joml.Matrix3f;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
-import org.joml.Vector4f;
 
 /**
  * The model of the carrier block.
@@ -60,19 +57,74 @@ import org.joml.Vector4f;
  *   <li>nothing is drawn from a render stage, so there is no extra buffer to flicker.</li>
  * </ul>
  *
- * <p>An earlier version drew the block from a block entity renderer with a rotated pose. Every
- * symptom this class fixes - too dark, wrong gradient, flicker - came from the lighting and the shader
- * phase having to be reproduced by hand there.
+ * <h2>The three texture bugs this class has to avoid</h2>
+ *
+ * <p>Rotated blocks used to show missing textures, the purple/black checkerboard, and the previous
+ * block's texture overlapping the new one. There were exactly three causes, and each one is now
+ * handled at the point where it was introduced:
+ *
+ * <ol>
+ *   <li><b>The rotated quad kept its old {@code Direction}.</b> {@code BakedQuad.direction} is what
+ *       the mesher's ambient-occlusion pass and its per-face lightmap sample are indexed by. A quad
+ *       that had been turned to face north but still claimed to face up was lit from the wrong side,
+ *       and a quad filed under a direction it does not report made the two disagree. Every rebuilt
+ *       quad is now constructed with the direction it <em>now</em> faces.</li>
+ *   <li><b>Model data was never refreshed on the client.</b> The wrapped state reaches a client
+ *       through the block entity update packet, which goes to {@code load} and not to
+ *       {@code onLoad} - so {@code ModelDataManager} kept serving the data it captured when the
+ *       carrier was still empty, and the model was asked to draw an air state. It answered with no
+ *       quads, which is a block with no texture at all, or with the geometry of whatever it held
+ *       before, which is the previous texture drawn on top of the new one.
+ *       {@code RotatedBlockEntity.load} now requests the refresh and invalidates the section.</li>
+ *   <li><b>The particle sprite was the missing-model sprite.</b> Break particles and the cracking
+ *       overlay both ask the model for a particle icon, and the carrier returned the purple/black
+ *       missing-texture sprite, so every rotated block spat checkerboard dust when mined. The icon is
+ *       now the wrapped block's own.</li>
+ * </ol>
  */
 @OnlyIn(Dist.CLIENT)
 public final class RotatedBlockModel implements IDynamicBakedModel {
     /** The state the carrier wraps. Set by the block entity through model data. */
     public static final ModelProperty<BlockState> INNER = new ModelProperty<>();
 
-    /** Cache of rotated geometry, keyed by (wrapped state, yaw, pitch). */
+    /**
+     * Cache of rotated geometry, keyed by (wrapped state, yaw, pitch, layer).
+     *
+     * <p>{@link BlockState} implements value equality and there are only 64 angle combinations per
+     * wrapped state, so this map is small and every entry in it is reused by every position that
+     * wraps the same block at the same angle - which is the common case, since a player who rotates
+     * one stone rotates twenty.
+     */
     private static final Map<Key, List<BakedQuad>[]> CACHE = new ConcurrentHashMap<>();
 
-    private record Key(BlockState inner, int yaw, int pitch) {
+    /**
+     * Upper bound on cached bucket sets.
+     *
+     * <p>Each entry holds the rotated quads of one (block, angle, layer), which for a detailed
+     * model is a few hundred {@code BakedQuad}s. The cache had no bound at all: a world that rotated
+     * many different blocks - a showcase build, a modpack's decorative set - grew it until the
+     * client ran out of memory, and the growth is invisible until it is fatal.
+     *
+     * <p>2048 entries is far more than any single view needs (a section is 4096 blocks and only a
+     * fraction of them are carriers) while still small enough to be a bounded, predictable cost.
+     */
+    private static final int CACHE_LIMIT = 2048;
+
+    /**
+     * Cache key for one built bucket set.
+     *
+     * <p>The render type is part of the key because a model can expose different quads per layer: a
+     * grass block's overlay lives on {@code cutout_mipped} while the dirt underneath is on
+     * {@code solid}, and asking the source model for the wrong layer returns the wrong geometry or
+     * none at all. That was one of the ways a texture went missing.
+     *
+     * <p>{@link ModelData} is deliberately <b>not</b> part of the key. It does not implement
+     * {@code equals}, so including it would compare by identity and miss the cache whenever the model
+     * data manager rebuilt an equal instance - a rebuild of every quad of every rotated block in
+     * view. The only thing this model reads out of it is {@link #INNER}, and that is already the
+     * first component of the key.
+     */
+    private record Key(BlockState inner, int yaw, int pitch, @Nullable RenderType renderType) {
     }
 
     private RotatedBlockModel() {
@@ -107,11 +159,47 @@ public final class RotatedBlockModel implements IDynamicBakedModel {
         if (inner == null || inner.isAir()) {
             return List.of();
         }
-        // The angles come from the carrier's own state, which is always the one being meshed.
-        int yaw = state == null ? 0 : state.getValue(com.sidedrain.block.RotatedBlock.YAW) * 45;
-        int pitch = state == null ? 0 : state.getValue(com.sidedrain.block.RotatedBlock.PITCH) * 45;
-        List<BakedQuad>[] byFace = CACHE.computeIfAbsent(new Key(inner, yaw, pitch),
-                key -> build(inner, yaw, pitch));
+        // Exactly one owner per wrapped block, or the block is drawn twice.
+        //
+        // A wrapped chest, bed, sign or shulker box is animated and cannot be expressed as static
+        // quads, so RotatedBlockRenderer draws it through its own block entity renderer - which is
+        // also the only way it gets its lid angle, its text or its two-block shape. The mesher must
+        // therefore return nothing for those, because the carrier's block state says MODEL and the
+        // mesher would otherwise happily tessellate the wrapped block's static model underneath the
+        // animated one. Two copies of the same surface, one rotated by the pose and one not, is
+        // precisely the "original texture overlapping the rotated one, misaligned" picture.
+        if (inner.getRenderShape() != net.minecraft.world.level.block.RenderShape.MODEL) {
+            return List.of();
+        }
+        // The angles come from the carrier's own state, which is always the one being meshed. A
+        // state that is not a carrier (an item render with no state) means no rotation.
+        int yaw = 0;
+        int pitch = 0;
+        if (state != null && state.hasProperty(com.sidedrain.block.RotatedBlock.YAW)) {
+            yaw = state.getValue(com.sidedrain.block.RotatedBlock.YAW) * 45;
+            pitch = state.getValue(com.sidedrain.block.RotatedBlock.PITCH) * 45;
+        }
+        // Locals, because a lambda may not capture a non-effectively-final variable. The four
+        // captured values are already final in spirit: they are read once here and never reassigned.
+        final int keyYaw = yaw;
+        final int keyPitch = pitch;
+        final RenderType keyLayer = renderType;
+        final ModelData keyData = data;
+        Key cacheKey = new Key(inner, keyYaw, keyPitch, keyLayer);
+        List<BakedQuad>[] byFace = CACHE.get(cacheKey);
+        if (byFace == null) {
+            // Built outside computeIfAbsent on purpose: build() asks the model manager for the
+            // wrapped block's model, and doing that inside a ConcurrentHashMap mapping function
+            // holds a bin lock across a fairly heavy call.
+            byFace = build(inner, keyYaw, keyPitch, keyLayer, keyData);
+            if (CACHE.size() >= CACHE_LIMIT) {
+                java.util.Iterator<Key> it = CACHE.keySet().iterator();
+                if (it.hasNext()) {
+                    CACHE.remove(it.next());
+                }
+            }
+            CACHE.put(cacheKey, byFace);
+        }
         if (side == null) {
             // The mesher asks for side == null when it wants geometry it must not cull. Only the
             // quads that could not be assigned to an axis direction live here, so nothing is drawn
@@ -133,19 +221,21 @@ public final class RotatedBlockModel implements IDynamicBakedModel {
 
     /** Builds the wrapped model's quads, rotated, and bucketed by the direction they now face. */
     @SuppressWarnings("unchecked")
-    private static List<BakedQuad>[] build(BlockState inner, int yaw, int pitch) {
+    private static List<BakedQuad>[] build(BlockState inner, int yaw, int pitch,
+                                           @Nullable RenderType renderType, ModelData data) {
         // One bucket per direction, plus the unculled one.
         List<BakedQuad>[] byFace = new List[Direction.values().length + 1];
         for (int i = 0; i < byFace.length; i++) {
             byFace[i] = new ArrayList<>();
         }
-        Minecraft minecraft = Minecraft.getInstance();
-        BakedModel source = minecraft.getBlockRenderer().getBlockModel(inner);
+        BakedModel source = sourceModel(inner);
         if (source == null) {
             return byFace;
         }
         Matrix4f transform = buildTransform(inner, yaw, pitch);
-        Matrix3f normalTransform = new Matrix3f(transform);
+        net.minecraftforge.client.model.IQuadTransformer transformer =
+                net.minecraftforge.client.model.QuadTransformers
+                        .applying(new com.mojang.math.Transformation(transform));
 
         // Whether the rotation lands the geometry back on the axis grid.
         //
@@ -156,19 +246,71 @@ public final class RotatedBlockModel implements IDynamicBakedModel {
         // neighbour would delete faces that are in plain sight.
         boolean axisAligned = Math.floorMod(yaw, 90) == 0 && Math.floorMod(pitch, 90) == 0;
 
+        // Ask the wrapped model with the SAME render type and model data the mesher is using for
+        // this pass. Passing null/EMPTY here (as an earlier version did) makes a model that varies
+        // its quads per layer return geometry for the wrong layer - or none at all - which reads in
+        // game as a missing texture or the purple/black checkerboard.
         for (Direction side : Direction.values()) {
             for (BakedQuad quad : source.getQuads(inner, side, RandomSource.create(42L),
-                    ModelData.EMPTY, null)) {
-                BakedQuad rotated = rotate(quad, transform, normalTransform);
-                byFace[axisAligned ? facingOf(rotated).get3DDataValue() : UNCULLED].add(rotated);
+                    data, renderType)) {
+                addRotated(byFace, quad, transformer, transform, axisAligned);
             }
         }
         for (BakedQuad quad : source.getQuads(inner, null, RandomSource.create(42L),
-                ModelData.EMPTY, null)) {
-            BakedQuad rotated = rotate(quad, transform, normalTransform);
-            byFace[axisAligned ? facingOf(rotated).get3DDataValue() : UNCULLED].add(rotated);
+                data, renderType)) {
+            addRotated(byFace, quad, transformer, transform, axisAligned);
         }
         return byFace;
+    }
+
+    /**
+     * Rotates one quad, files it under the direction it now faces, and stamps that direction on it.
+     *
+     * <p>The stamped direction is the important half. {@code BakedQuad.direction} is not decoration:
+     * {@code ModelBlockRenderer} hands it to the ambient-occlusion pass, to the per-face lightmap
+     * sample and to the flat-lighting path, so a quad whose field disagrees with the bucket it was
+     * filed under is lit as if it still faced the old way. That disagreement is what made turned
+     * blocks show black faces, and on a shader pack it also changed which sample the shadow map was
+     * taken from.
+     */
+    private static void addRotated(List<BakedQuad>[] byFace, BakedQuad quad,
+                                   net.minecraftforge.client.model.IQuadTransformer transformer,
+                                   Matrix4f transform, boolean axisAligned) {
+        // process() copies the quad first, so the cached source model's vertices are never mutated -
+        // which matters because the same BakedQuad instance is shared by every position using it.
+        BakedQuad rotated = transformer.process(quad);
+        Direction restamped = axisAligned ? facingOf(quad.getDirection(), transform) : null;
+        if (restamped != null && restamped != rotated.getDirection()) {
+            rotated = new BakedQuad(rotated.getVertices(), rotated.getTintIndex(), restamped,
+                    rotated.getSprite(), rotated.isShade(), rotated.hasAmbientOcclusion());
+        }
+        int bucket = axisAligned && restamped != null ? restamped.get3DDataValue() : UNCULLED;
+        byFace[bucket].add(rotated);
+    }
+
+    /**
+     * The baked model of the wrapped block, or {@code null} when there is nothing safe to draw.
+     *
+     * <p>Two guards matter here. A carrier must never wrap another carrier: asking the model shaper
+     * for the model of a carrier state returns <b>this</b> class, which would recurse until the stack
+     * ran out inside the chunk mesher. And the result must not be the missing model, because drawing
+     * the missing model's quads is precisely the purple/black checkerboard this class is trying to
+     * avoid - an empty carrier is better than a checkerboard.
+     */
+    @Nullable
+    private static BakedModel sourceModel(BlockState inner) {
+        if (inner.getBlock() instanceof com.sidedrain.block.RotatedBlock) {
+            return null;
+        }
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.getBlockRenderer() == null) {
+            return null;
+        }
+        BakedModel source = minecraft.getBlockRenderer().getBlockModel(inner);
+        if (source == null || source == minecraft.getModelManager().getMissingModel()) {
+            return null;
+        }
+        return source;
     }
 
     /**
@@ -202,44 +344,24 @@ public final class RotatedBlockModel implements IDynamicBakedModel {
         return matrix;
     }
 
-    /** Rotates one quad's positions and normals; UVs, tint and sprite are left untouched. */
-    private static BakedQuad rotate(BakedQuad quad, Matrix4f transform, Matrix3f normalTransform) {
-        int[] vertices = quad.getVertices().clone();
-        for (int i = 0; i < 4; i++) {
-            int offset = i * 8;
-            Vector4f pos = new Vector4f(
-                    Float.intBitsToFloat(vertices[offset]),
-                    Float.intBitsToFloat(vertices[offset + 1]),
-                    Float.intBitsToFloat(vertices[offset + 2]),
-                    1.0F);
-            transform.transform(pos);
-            vertices[offset] = Float.floatToRawIntBits(pos.x());
-            vertices[offset + 1] = Float.floatToRawIntBits(pos.y());
-            vertices[offset + 2] = Float.floatToRawIntBits(pos.z());
-
-            int normalIn = vertices[offset + 5];
-            Vector3f normal = new Vector3f(
-                    ((byte) (normalIn & 0xFF)) / 127.0F,
-                    ((byte) ((normalIn >> 8) & 0xFF)) / 127.0F,
-                    ((byte) ((normalIn >> 16) & 0xFF)) / 127.0F);
-            normalTransform.transform(normal);
-            vertices[offset + 5] = (((byte) (normal.x() * 127.0F)) & 0xFF)
-                    | ((((byte) (normal.y() * 127.0F)) & 0xFF) << 8)
-                    | ((((byte) (normal.z() * 127.0F)) & 0xFF) << 16)
-                    | (normalIn & 0xFF000000);
+    /**
+     * The axis direction a quad faces <b>after</b> the rotation.
+     *
+     * <p>Rotating a quad changes which way it points, so its original {@code direction} field is no
+     * longer the answer - a face that was {@code UP} becomes {@code NORTH} after a 90 degree pitch.
+     * The mesher culls per direction, so bucketing by the old value would hide faces that are in
+     * plain sight and draw ones that are buried.
+     *
+     * <p>The rotated normal is derived from the transform itself. For the 90 degree steps that is
+     * exact; the 45 degree steps go to the unculled bucket instead, so an approximation is never
+     * used for a culling decision.
+     */
+    private static Direction facingOf(@Nullable Direction original, Matrix4f transform) {
+        if (original == null) {
+            return Direction.UP;
         }
-        return new BakedQuad(vertices, quad.getTintIndex(), quad.getDirection(), quad.getSprite(),
-                quad.isShade(), quad.hasAmbientOcclusion());
-    }
-
-    /** The axis direction the rotated quad now faces. */
-    private static Direction facingOf(BakedQuad quad) {
-        int[] vertices = quad.getVertices();
-        int normalIn = vertices[5];
-        Vector3f normal = new Vector3f(
-                ((byte) (normalIn & 0xFF)) / 127.0F,
-                ((byte) ((normalIn >> 8) & 0xFF)) / 127.0F,
-                ((byte) ((normalIn >> 16) & 0xFF)) / 127.0F);
+        Vector3f normal = new Vector3f(original.getStepX(), original.getStepY(), original.getStepZ());
+        new Matrix3f(transform).transform(normal);
         Direction best = Direction.UP;
         float bestDot = -2.0F;
         for (Direction side : Direction.values()) {
@@ -277,11 +399,20 @@ public final class RotatedBlockModel implements IDynamicBakedModel {
         if (inner == null || inner.isAir()) {
             return net.minecraftforge.client.ChunkRenderTypeSet.none();
         }
-        BakedModel source = Minecraft.getInstance().getBlockRenderer().getBlockModel(inner);
+        // An animated wrapped block owns no mesh - see getQuads. Reporting a layer for it would make
+        // the mesher open a buffer for a section that has nothing to put in it, and (worse) tell the
+        // renderer the cell has terrain geometry when the only thing there is the block entity pass.
+        if (inner.getRenderShape() != net.minecraft.world.level.block.RenderShape.MODEL) {
+            return net.minecraftforge.client.ChunkRenderTypeSet.none();
+        }
+        BakedModel source = sourceModel(inner);
         if (source == null) {
             return net.minecraftforge.client.ChunkRenderTypeSet.none();
         }
-        return source.getRenderTypes(inner, rand, ModelData.EMPTY);
+        // Forward the model data too: a model that picks its layer per position would otherwise be
+        // asked with EMPTY and could answer with the wrong layer - the same class of bug as asking
+        // for quads with the wrong render type.
+        return source.getRenderTypes(inner, rand, data);
     }
 
     @Override
@@ -304,9 +435,36 @@ public final class RotatedBlockModel implements IDynamicBakedModel {
         return false;
     }
 
+    /**
+     * The particle sprite of the wrapped block.
+     *
+     * <p>Break particles and the cracking overlay both ask for this, and the answer used to be the
+     * missing model's sprite: every rotated block spat the purple/black checkerboard when mined, and
+     * the crack overlay drawn over it was checkerboard as well. That is one of the three texture bugs
+     * in this class's header, and it is fixed simply by asking the wrapped block.
+     *
+     * <p>The no-argument overload is the one vanilla's particle path calls, and it carries no
+     * position, so the carrier resolves which block it is from the crosshair target - the same trick
+     * {@link CarrierNameLookup} uses for the HUD name, and correct for exactly the case that matters:
+     * the player is looking at the block they are mining.
+     */
     @Override
     public TextureAtlasSprite getParticleIcon() {
-        return Minecraft.getInstance().getModelManager().getMissingModel().getParticleIcon();
+        return getParticleIcon(ModelData.EMPTY);
+    }
+
+    @Override
+    public TextureAtlasSprite getParticleIcon(ModelData data) {
+        Minecraft minecraft = Minecraft.getInstance();
+        BlockState inner = data.get(INNER);
+        if (inner == null || inner.isAir()) {
+            inner = CarrierNameLookup.aimedInner();
+        }
+        BakedModel source = inner == null ? null : sourceModel(inner);
+        if (source != null) {
+            return source.getParticleIcon(data);
+        }
+        return minecraft.getModelManager().getMissingModel().getParticleIcon();
     }
 
     @Override

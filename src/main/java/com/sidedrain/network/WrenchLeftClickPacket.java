@@ -10,22 +10,46 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.network.NetworkEvent;
 
 /**
- * Shift + left click with the wrench rotates horizontally. The client cancels the attack before
- * the vanilla packet is built, so the request has to travel on its own channel.
+ * A wrench click, sent on its own channel.
+ *
+ * <p>The client cancels the vanilla interaction before it is built - a left click would start
+ * breaking the block and a right click would open the container - so the request has to travel
+ * separately.
+ *
+ * <h2>Why the packet carries the axis</h2>
+ *
+ * <p>The two rotations used to be told apart by which vanilla input produced them: left click meant
+ * spin, right click meant flip. That is no longer enough, because the player may bind either action
+ * to either button - or to both. The axis therefore travels with the request, so the server does
+ * exactly what the binding said rather than guessing from the button.
  */
 public class WrenchLeftClickPacket {
-    private final BlockPos pos;
+    /** Flip the block over: rotate about the horizontal axis. */
+    public static final byte PITCH = 0;
+    /** Spin the block around: rotate about the vertical axis. */
+    public static final byte SPIN = 1;
 
-    public WrenchLeftClickPacket(BlockPos pos) {
+    private final BlockPos pos;
+    private final byte axis;
+
+    public WrenchLeftClickPacket(BlockPos pos, byte axis) {
         this.pos = pos;
+        this.axis = axis;
+    }
+
+    /** Kept for the older call sites: a plain constructor request means a spin. */
+    public WrenchLeftClickPacket(BlockPos pos) {
+        this(pos, SPIN);
     }
 
     public void encode(FriendlyByteBuf buffer) {
         buffer.writeBlockPos(this.pos);
+        buffer.writeByte(this.axis);
     }
 
     public static WrenchLeftClickPacket decode(FriendlyByteBuf buffer) {
-        return new WrenchLeftClickPacket(buffer.readBlockPos());
+        BlockPos pos = buffer.readBlockPos();
+        return new WrenchLeftClickPacket(pos, buffer.readByte());
     }
 
     public void handle(Supplier<NetworkEvent.Context> supplier) {
@@ -34,10 +58,13 @@ public class WrenchLeftClickPacket {
         if (player == null) {
             return;
         }
-        ItemStack held = player.getItemInHand(InteractionHand.MAIN_HAND);
-        if (!(held.getItem() instanceof OrientationWrenchItem) || !player.isShiftKeyDown()) {
+        // The wrench may be in either hand: the binding is a gesture, not a main-hand rule.
+        if (!holdsWrench(player)) {
             return;
         }
+        // The sneak gesture keeps working, and the bound key is an addition rather than a
+        // replacement, so a request is honoured whether or not the player is sneaking: the client
+        // already decided that this click was a wrench action.
         if (!player.level().mayInteract(player, this.pos)) {
             return;
         }
@@ -45,6 +72,15 @@ public class WrenchLeftClickPacket {
         if (distance > 64.0D) {
             return;
         }
-        OrientationWrenchItem.applyRotation(player.level(), this.pos, false);
+        OrientationWrenchItem.applyRotation(player.level(), this.pos, this.axis == PITCH);
+    }
+
+    private static boolean holdsWrench(ServerPlayer player) {
+        ItemStack main = player.getItemInHand(InteractionHand.MAIN_HAND);
+        if (main.getItem() instanceof OrientationWrenchItem) {
+            return true;
+        }
+        ItemStack off = player.getItemInHand(InteractionHand.OFF_HAND);
+        return off.getItem() instanceof OrientationWrenchItem;
     }
 }

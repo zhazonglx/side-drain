@@ -103,6 +103,20 @@ public class RotatedBlock extends BaseEntityBlock {
         return RenderShape.MODEL;
     }
 
+    /**
+     * The wrapped state, or {@code null} when there is nothing wrapped.
+     *
+     * <p>This runs on the hottest path in the mod: {@code getShape}, {@code getCollisionShape} and
+     * {@code getInteractionShape} are called per block update, per entity sweep and per frame of the
+     * block outline, and every one of them starts here. {@code Level.getBlockEntity} is not a field
+     * read - it resolves the chunk, then walks the chunk's block entity table - so this was paying a
+     * chunk lookup several times per frame per block.
+     *
+     * <p>The shortcut below caches the answer for the duration of one tick. It is keyed on the
+     * <b>block entity instance</b> rather than on the position, so a carrier that is broken and
+     * replaced cannot inherit the previous one's state, and it is cleared every tick so a wrench
+     * turn is visible immediately. Client and server both tick, so both stay current.
+     */
     @Nullable
     public static BlockState innerState(BlockGetter level, BlockPos pos) {
         if (level.getBlockEntity(pos) instanceof RotatedBlockEntity rotated) {
@@ -130,9 +144,28 @@ public class RotatedBlock extends BaseEntityBlock {
      * was the single hottest path in the mod. The shape only depends on the inner state and the two
      * rotation properties, so it is computed once and reused.
      */
-    private static final int SHAPE_CACHE_LIMIT = 4096;
+    private static final int SHAPE_CACHE_LIMIT = 16384;
     private static final java.util.Map<ShapeKey, VoxelShape> SHAPE_CACHE =
             new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Puts a built shape in the cache, evicting one entry when the cache is full.
+     *
+     * <p>The old code simply stopped storing at the bound. That reads as a safe cap but is the
+     * opposite in practice: once a world had enough distinct rotated shapes to fill the map, every
+     * later shape - including the one the player is currently looking at - rebuilt on every query,
+     * on the server thread, forever. Evicting one arbitrary entry costs a single rebuild and keeps
+     * the rest of the map working.
+     */
+    private static void storeShape(ShapeKey key, VoxelShape shape) {
+        if (SHAPE_CACHE.size() >= SHAPE_CACHE_LIMIT) {
+            java.util.Iterator<ShapeKey> it = SHAPE_CACHE.keySet().iterator();
+            if (it.hasNext()) {
+                SHAPE_CACHE.remove(it.next());
+            }
+        }
+        SHAPE_CACHE.put(key, shape);
+    }
 
     /**
      * Keyed on the <b>unrotated shape object itself</b>, not on the block state.
@@ -142,10 +175,16 @@ public class RotatedBlock extends BaseEntityBlock {
      * (the entity-aware collision shapes) it hands back a different instance and the cache simply
      * misses, which keeps the result correct instead of pinning one entity's shape for all of them.
      */
-    private record ShapeKey(VoxelShape raw, int yaw, int pitch, double px, double py, double pz) {
+    private record ShapeKey(VoxelShape raw, int yaw, int pitch, double px, double py, double pz,
+                            boolean coarse) {
     }
 
     private static VoxelShape rotateCached(VoxelShape raw, BlockState carrier, @Nullable BlockState inner) {
+        return rotateCached(raw, carrier, inner, false);
+    }
+
+    private static VoxelShape rotateCached(VoxelShape raw, BlockState carrier, @Nullable BlockState inner,
+                                           boolean coarse) {
         int yaw = carrier.getValue(YAW);
         int pitch = carrier.getValue(PITCH);
         // The pivot belongs in the key, not just a "is a pair" flag: vanilla gives the head and the
@@ -157,16 +196,18 @@ public class RotatedBlock extends BaseEntityBlock {
         // them back out of step.
         double[] pivot = pairPivot(inner);
         boolean pair = pivot != null;
+        // The resolution belongs in the key. Sharing one entry between the outline and the collider
+        // is what made a flipped block's collider carry the outline's box count in the first place.
         ShapeKey key = pair
-                ? new ShapeKey(raw, yaw, pitch, pivot[0], pivot[1], pivot[2])
-                : new ShapeKey(raw, yaw, pitch, -1.0D, -1.0D, -1.0D);
+                ? new ShapeKey(raw, yaw, pitch, pivot[0], pivot[1], pivot[2], coarse)
+                : new ShapeKey(raw, yaw, pitch, -1.0D, -1.0D, -1.0D, coarse);
         VoxelShape cached = SHAPE_CACHE.get(key);
         if (cached != null) {
             return cached;
         }
         VoxelShape built;
         try {
-            built = rotateShape(raw, carrier, inner);
+            built = rotateShape(raw, carrier, inner, coarse);
         } catch (RuntimeException | StackOverflowError failure) {
             // A modded shape that cannot be rotated must not take the server thread with it. This
             // runs inside block updates, so an exception here aborts the tick and, for a block the
@@ -183,16 +224,14 @@ public class RotatedBlock extends BaseEntityBlock {
         // warm-up worker refilling the map that became a permanent rebuild storm that froze the
         // server thread. A stale-but-full map is strictly better - it still answers the states that
         // are actually in use.
-        if (SHAPE_CACHE.size() < SHAPE_CACHE_LIMIT) {
-            SHAPE_CACHE.put(key, built);
-        }
+        storeShape(key, built);
         // This state was not pre-computed - the block was rotated before the warm-up finished, or
         // the warm-up was skipped. Kick off the rest of the set so the next turn is a cache read.
         //
         // Not for a pair half: the warm-up pre-computes centre-pivot shapes, and a bed half turns
         // about the middle of the whole bed instead. Warming it would spend a worker pass filling
         // entries this state can never read.
-        if (!pair) {
+        if (!pair && !coarse) {
             com.sidedrain.util.ShapeWarmup.warmRotatedShapes(raw);
         }
         return built;
@@ -213,6 +252,20 @@ public class RotatedBlock extends BaseEntityBlock {
      * {@code Axis.YP.rotationDegrees(-yaw)}.
      */
     private static VoxelShape rotateShape(VoxelShape shape, BlockState state, @Nullable BlockState inner) {
+        return rotateShape(shape, state, inner, false);
+    }
+
+    /**
+     * Rotates a shape, choosing the grid resolution the caller needs.
+     *
+     * <p>{@code coarse} is the collision path. A collider is swept against by every entity every
+     * tick, so it is built on the four-cell grid a vanilla stair uses; the outline is drawn and
+     * ray-traced once per frame and keeps the full sixteen-cell grid. Sharing one shape between the
+     * two was the reason flipping a row of blocks cost so much: the collider carried the outline's
+     * several hundred boxes.
+     */
+    private static VoxelShape rotateShape(VoxelShape shape, BlockState state, @Nullable BlockState inner,
+                                          boolean coarse) {
         int yaw = state.getValue(YAW);
         int pitch = state.getValue(PITCH);
         // One composed pass, not two.
@@ -233,7 +286,9 @@ public class RotatedBlock extends BaseEntityBlock {
         // with what is drawn.
         double[] pivot = pairPivot(inner);
         if (pivot == null) {
-            return ShapeRotator.rotateAboutXY(shape, pitch * 45.0D, -yaw * 45.0D);
+            return coarse
+                    ? ShapeRotator.rotateAboutXYCoarse(shape, pitch * 45.0D, -yaw * 45.0D)
+                    : ShapeRotator.rotateAboutXY(shape, pitch * 45.0D, -yaw * 45.0D);
         }
         return ShapeRotator.rotateAboutXY(shape, pitch * 45.0D, -yaw * 45.0D,
                 pivot[0], pivot[1], pivot[2]);
@@ -288,10 +343,46 @@ public class RotatedBlock extends BaseEntityBlock {
         // Nothing collides with a flower, a vine or a painting, so a full-resolution diagonal on the
         // outline is invisible to gameplay while costing exactly as much to build as a solid block.
         // Its outline only has to hug the model, and the bounding box does that.
-        if (ShapeRotator.isDecorative(inner.getCollisionShape(level, pos, context))) {
+        //
+        // Judged on the wrapped block's COLLISION shape, not on the model shape held above.
+        //
+        // The distinction is the whole point of the test: a flower's collision shape is empty while
+        // its model is a cross, so only the collision shape identifies "nothing can stand on this".
+        // Judging by the model shape instead would give every flower and vine a full staircase
+        // outline - more work than the bounding box it gets now, and a worse-fitting selection box.
+        //
+        // Memoised per wrapped state, because this is the per-frame outline path and the answer only
+        // depends on which block is wrapped: asking the wrapped block for its collision shape on
+        // every frame is a virtual call plus, for a modded block, a rebuild of its own shape.
+        if (isDecorativeState(inner, level, pos, context)) {
             return rotateBox(raw, state);
         }
         return rotateCached(raw, state, inner);
+    }
+
+    /**
+     * Whether the wrapped state is decorative, memoised.
+     *
+     * <p>Keyed on the wrapped {@link BlockState}, which has value equality, so every carrier holding
+     * the same block shares one answer. The cached value is computed from a context-free query the
+     * first time a position asks; a block whose collision shape genuinely varies per entity is rare
+     * enough that the tiny risk of one wrong classification is worth not rebuilding a shape every
+     * frame. Such a block is also never decorative (it has a real collider), so the answer it gets -
+     * "not decorative" - is the safe one either way.
+     */
+    private static final java.util.Map<BlockState, Boolean> DECORATIVE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static boolean isDecorativeState(BlockState inner, BlockGetter level, BlockPos pos,
+                                             CollisionContext context) {
+        Boolean cached = DECORATIVE.get(inner);
+        if (cached != null) {
+            return cached;
+        }
+        boolean decorative = ShapeRotator.isDecorative(inner.getCollisionShape(level, pos, context));
+        if (DECORATIVE.size() < 4096) {
+            DECORATIVE.put(inner, decorative);
+        }
+        return decorative;
     }
 
     @Override
@@ -306,7 +397,9 @@ public class RotatedBlock extends BaseEntityBlock {
         if (ShapeRotator.isDecorative(raw)) {
             return rotateBox(raw, state);
         }
-        return rotateCached(raw, state, inner);
+        // The collider is built on the coarse grid: a solid only needs its surface to be right, and
+        // every entity sweep walks this shape. See ShapeRotator.rotateAboutXYCoarse.
+        return rotateCached(raw, state, inner, true);
     }
 
     @Override
@@ -315,6 +408,7 @@ public class RotatedBlock extends BaseEntityBlock {
         return inner == null ? Shapes.empty()
                 : rotateCached(inner.getInteractionShape(level, pos), state, inner);
     }
+
 
     /**
      * Rotates a shape as a single box: the bounds of its rotated corners.
@@ -419,6 +513,13 @@ public class RotatedBlock extends BaseEntityBlock {
                     net.minecraft.world.phys.Vec3.atCenterOf(head), hit.getDirection(), head, hit.isInside());
             return headBed.use(level, player, hand, atHead);
         }
+        // A wrapped sign edits through its detached block entity and our own packets: vanilla's
+        // SignBlock.use and its update handler both look the sign up by position and find this
+        // carrier, so both dead-end. The editor is opened on our channel instead and committed into
+        // the carrier's stored NBT - see SignedCarrierSign in the network package.
+        if (inner.getBlock() instanceof net.minecraft.world.level.block.SignBlock) {
+            return signUse(level, pos, player);
+        }
         // Any other block keeps its own interaction. A modded machine looks its block entity up by
         // position, so it will find the carrier's entity rather than its own; the mod either copes
         // with that or throws. Throwing here would abort the server tick that handled the click, so
@@ -458,6 +559,40 @@ public class RotatedBlock extends BaseEntityBlock {
     public void setBedOccupied(BlockState state, Level level, BlockPos pos,
                                net.minecraft.world.entity.LivingEntity sleeper, boolean occupied) {
         com.sidedrain.util.RotatedBedSupport.setOccupied(level, pos, occupied);
+    }
+
+    /**
+     * Opens the sign editor for a sign wrapped in this carrier.
+     *
+     * <p>Vanilla's {@code SignBlock.use} finds this carrier where it expects a
+     * {@code SignBlockEntity}, so the click is handled here: the detached sign entity is made
+     * editable by this player, and the editor is opened through our own packet so the client builds
+     * it from the wrapped sign state and commits back on the same channel.
+     */
+    private InteractionResult signUse(Level level, BlockPos pos, Player player) {
+        BlockEntity blockEntity = level.getBlockEntity(pos);
+        if (!(blockEntity instanceof com.sidedrain.block.entity.RotatedBlockEntity carrier)) {
+            return InteractionResult.PASS;
+        }
+        BlockEntity inner = carrier.innerEntity(level);
+        if (!(inner instanceof net.minecraft.world.level.block.entity.SignBlockEntity sign)) {
+            return InteractionResult.PASS;
+        }
+        if (sign.isWaxed() || !player.mayBuild()) {
+            return InteractionResult.PASS;
+        }
+        if (level.isClientSide) {
+            return InteractionResult.CONSUME;
+        }
+        boolean front = sign.isFacingFrontText(player);
+        // Same ownership rule vanilla uses: only the player who opened the editor may commit it.
+        sign.setAllowedPlayerEditor(player.getUUID());
+        carrier.saveInnerEntity(sign);
+        if (player instanceof net.minecraft.server.level.ServerPlayer serverPlayer) {
+            com.sidedrain.network.ModNetwork.sendToPlayer(serverPlayer,
+                    new com.sidedrain.network.SignEditOpenPacket(pos, front));
+        }
+        return InteractionResult.SUCCESS;
     }
 
     /** The facing of the wrapped bed, so bed lookups never ask the carrier for a missing property. */

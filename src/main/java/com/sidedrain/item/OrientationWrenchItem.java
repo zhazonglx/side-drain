@@ -48,6 +48,13 @@ public class OrientationWrenchItem extends Item {
         super(properties);
     }
 
+    /**
+     * Sneak + right click flips the block over, as it always has.
+     *
+     * <p>This is the original gesture and it stays. The {@code G} key binding is an <b>addition</b>
+     * for players who would rather not hold sneak, not a replacement - see
+     * {@link com.sidedrain.client.ModKeys}.
+     */
     @Override
     public InteractionResult onItemUseFirst(ItemStack stack, UseOnContext context) {
         Level level = context.getLevel();
@@ -516,22 +523,30 @@ public class OrientationWrenchItem extends Item {
     }
 
     /**
-     * Aims a Side Drain Plate's nozzle in 45 degree steps.
+     * Aims a Side Drain Plate's nozzle with the two independent aim rings.
      *
-     * <p>Shift + right walks the aim up through the eight steps; shift + left walks it back down.
-     * The plate stays clamped to the same container face throughout - only where it points changes -
-     * so a plate on a wall can be aimed straight out, diagonally up, or straight up, and items leave
-     * along exactly the angle that was chosen. The collision box follows the same value, so the
-     * shape you bump into is the plate you can see.
+     * <p>Shift + right walks the <b>tilt</b> ring: the nozzle flips from straight out, up through the
+     * diagonals, over the top and down the other side - the "top to bottom" flip. Shift + left walks
+     * the <b>spin</b> ring: the nozzle sweeps left to right about the vertical axis. The two rings
+     * are independent, so between them every aim on the sphere is reachable, rather than one ring and
+     * its own undo.
+     *
+     * <p>The plate stays clamped to the same container face throughout - only where it points
+     * changes. The collision box and the render follow the same two values, so the shape you bump
+     * into is the plate you can see.
      */
     private static BlockState turnPlate(BlockState state, boolean pitch) {
-        int tilt = state.getValue(com.sidedrain.block.SideDrainBlock.TILT);
         int steps = com.sidedrain.util.PlateAim.STEPS;
-        // Right click is the pitch click, so it must walk the aim downwards (top to bottom) and the
-        // left click must walk it back up. These were the other way round, which made the two clicks
-        // look swapped to anyone comparing them with how the wrench turns every other block.
-        int next = pitch ? (tilt + steps - 1) % steps : (tilt + 1) % steps;
-        return state.setValue(com.sidedrain.block.SideDrainBlock.TILT, next);
+        if (pitch) {
+            // Right click: the tilt ring, top to bottom.
+            int tilt = state.getValue(com.sidedrain.block.SideDrainBlock.TILT);
+            return state.setValue(com.sidedrain.block.SideDrainBlock.TILT, (tilt + 1) % steps);
+        }
+        // Left click: the spin ring, left to right. For an up or down plate the vertical axis is the
+        // aim itself, so a spin there changes nothing and the click is honestly spent - the tilt ring
+        // already covers every aim those plates have.
+        int spin = state.getValue(com.sidedrain.block.SideDrainBlock.SPIN);
+        return state.setValue(com.sidedrain.block.SideDrainBlock.SPIN, (spin + 1) % steps);
     }
 
     /**

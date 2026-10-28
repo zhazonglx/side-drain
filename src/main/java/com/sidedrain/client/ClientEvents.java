@@ -22,8 +22,73 @@ public final class ClientEvents {
     /** Throttles the shift + left click rotation so holding the button does not spam packets. */
     private static long lastWrenchClick = Long.MIN_VALUE / 2;
 
+    /**
+     * Handles the mod's own key bindings.
+     *
+     * <p>{@code ClientTickEvent} is the right hook: {@code KeyMapping.consumeClick()} has to be
+     * drained every tick or the press queue grows, and the tick runs whether or not a screen is
+     * open. The screen check is explicit because a bound key still fires while a container is open,
+     * and rotating or lifting a block from inside a chest screen is not something the player can
+     * mean.
+     */
+    @SubscribeEvent
+    public static void onClientTick(net.minecraftforge.event.TickEvent.ClientTickEvent event) {
+        if (event.phase != net.minecraftforge.event.TickEvent.Phase.END) {
+            return;
+        }
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.player == null || minecraft.level == null) {
+            return;
+        }
+        boolean usable = minecraft.screen == null && !minecraft.player.isSpectator();
+        // Drain both queues unconditionally: a click left over from a screen is discarded rather
+        // than firing the moment the screen closes.
+        boolean rotate = ModKeys.ROTATE.consumeClick();
+        boolean carry = ModKeys.CARRY.consumeClick();
+        if (!usable) {
+            return;
+        }
+        if (rotate) {
+            rotateUnderCursor(minecraft);
+        }
+        if (carry) {
+            // The same action as the sneak + middle click gesture, minus the sneak requirement: a
+            // bound key is already an explicit intent. Both end in CarryHandler's shared body, so
+            // they can never behave differently.
+            CarryHandler.onBoundKey();
+        }
+    }
+
+    /**
+     * Sends the wrench's spin request for whatever the player is looking at.
+     *
+     * <p>Separate from the sneak + left click path because that one has to cancel a vanilla attack;
+     * this one has no vanilla action to suppress, so it only has to send the packet. The same
+     * throttle applies, so holding the key turns a block at a readable rate instead of one packet
+     * per frame.
+     */
+    private static void rotateUnderCursor(Minecraft minecraft) {
+        if (!(minecraft.player.getMainHandItem().getItem()
+                instanceof com.sidedrain.item.OrientationWrenchItem)) {
+            return;
+        }
+        if (minecraft.hitResult == null || minecraft.hitResult.getType() != HitResult.Type.BLOCK) {
+            return;
+        }
+        BlockHitResult hit = (BlockHitResult) minecraft.hitResult;
+        if (!sendRotation(minecraft, hit, com.sidedrain.network.WrenchLeftClickPacket.SPIN)) {
+            return;
+        }
+    }
+
+    /**
+     * Sneak + middle click carries a block, as it always has.
+     *
+     * <p>This is the original gesture and it stays: the {@code R} binding is an addition, not a
+     * replacement. Both reach {@link CarryHandler#onPickBlock()}, so they cannot behave differently.
+     */
     @SubscribeEvent(priority = EventPriority.HIGH)
-    public static void onInteractionKey(InputEvent.InteractionKeyMappingTriggered event) {
+    public static void onPickBlock(InputEvent.InteractionKeyMappingTriggered event) {
         if (!event.isPickBlock()) {
             return;
         }
@@ -33,6 +98,12 @@ public final class ClientEvents {
         }
     }
 
+    /**
+     * Sneak + left click spins the block with the wrench, as it always has.
+     *
+     * <p>The {@code G} binding does the same thing without sneaking; this path keeps the original
+     * gesture alive and cancels the vanilla attack so the block is not mined instead.
+     */
     @SubscribeEvent(priority = EventPriority.HIGH)
     public static void onLeftClick(InputEvent.InteractionKeyMappingTriggered event) {
         if (!event.isAttack()) {
@@ -55,11 +126,36 @@ public final class ClientEvents {
             event.setSwingHand(false);
             return;
         }
-        lastWrenchClick = now;
-        com.sidedrain.network.ModNetwork.sendToServer(
-                new com.sidedrain.network.WrenchLeftClickPacket(hit.getBlockPos()));
+        sendRotation(minecraft, hit, com.sidedrain.network.WrenchLeftClickPacket.SPIN);
         event.setCanceled(true);
         event.setSwingHand(true);
+    }
+
+    /** True when the wrench is in the main or the off hand, which is what "holding it" means. */
+    private static boolean wrenchInHand(Minecraft minecraft) {
+        if (minecraft.player == null) {
+            return false;
+        }
+        return minecraft.player.getMainHandItem().getItem()
+                instanceof com.sidedrain.item.OrientationWrenchItem
+                || minecraft.player.getOffhandItem().getItem()
+                instanceof com.sidedrain.item.OrientationWrenchItem;
+    }
+
+    /**
+     * Sends the wrench request for the targeted block.
+     *
+     * @return true when a packet was sent
+     */
+    private static boolean sendRotation(Minecraft minecraft, BlockHitResult hit, byte axis) {
+        long now = minecraft.level == null ? 0L : minecraft.level.getGameTime();
+        if (now - lastWrenchClick < 4L) {
+            return false;
+        }
+        lastWrenchClick = now;
+        com.sidedrain.network.ModNetwork.sendToServer(
+                new com.sidedrain.network.WrenchLeftClickPacket(hit.getBlockPos(), axis));
+        return true;
     }
 
     /**
@@ -101,6 +197,11 @@ public final class ClientEvents {
         // FIRST_PERSON item pose for the fallback, which is why a shulker box came out half size.
         CarryBlockRender.draw(state, carriedStack, poseStack, event.getMultiBufferSource(),
                 event.getPackedLight(), level, true);
+        // The plates clamped onto the carried block are drawn in the same block-centred space, so
+        // they sit exactly where they were standing and follow the hand on the same frame.
+        com.sidedrain.client.CarryPlateRender.drawCarriedPlates(
+                com.sidedrain.client.CarryHandler.gloveInHand(minecraft.player), poseStack,
+                event.getMultiBufferSource(), event.getPackedLight(), level);
         poseStack.popPose();
     }
 

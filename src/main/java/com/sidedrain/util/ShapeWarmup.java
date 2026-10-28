@@ -131,15 +131,31 @@ public final class ShapeWarmup {
                 if (pitch == 0 && yaw == 0) {
                     continue;
                 }
-                // The yaw step is a pure quarter turn at every 90 degrees and a slice otherwise;
-                // pre-building only the states that cost real work keeps the pool from spending
-                // its whole budget on combinations nobody asked for.
+                // Quarter turns are free and are never cached.
+                //
+                // When both steps are even the rotation lands back on the axis grid, and
+                // ShapeRotator answers it with a plain rotateX/spinY - no slicing, no cache entry.
+                // Warming those would only queue work whose result is thrown away.
+                if (pitch % 2 == 0 && yaw % 2 == 0) {
+                    continue;
+                }
                 final int p = pitch;
                 final int y = yaw;
                 executor.execute(() -> {
-                    // Mirror exactly what RotatedBlock.rotateShape does, so the cache keys match.
-                    VoxelShape pitched = ShapeRotator.rotateAboutX(raw, p * 45.0D);
-                    ShapeRotator.rotateAboutY(pitched, -y * 45.0D);
+                    // Both rotations the carrier actually performs, through the SAME entry points
+                    // RotatedBlock.rotateShape uses.
+                    //
+                    // This used to call rotateAboutX() and then rotateAboutY(). Those cache under
+                    // OP_ANGLE_X and OP_ANGLE_Y, while every real lookup goes through
+                    // rotateAboutXY() and caches under OP_ANGLE_XY / OP_ANGLE_XY_COARSE - two
+                    // disjoint key spaces. So none of this work was ever read: 63 builds per wrapped
+                    // block, thrown away, and worse, they filled the 2048-entry cache so that real
+                    // entries could no longer be added at all. After roughly thirty distinct rotated
+                    // shapes the cache stopped accepting anything and every collision query rebuilt
+                    // its shape from scratch on the server thread - the hitch this class exists to
+                    // prevent, made permanent.
+                    ShapeRotator.rotateAboutXYCoarse(raw, p * 45.0D, -y * 45.0D);
+                    ShapeRotator.rotateAboutXY(raw, p * 45.0D, -y * 45.0D);
                 });
             }
         }

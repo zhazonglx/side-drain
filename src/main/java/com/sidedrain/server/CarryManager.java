@@ -14,6 +14,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.block.entity.BlockEntityTicker;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -70,10 +71,16 @@ public final class CarryManager {
     }
 
     /**
-     * Every glove the player owns that is holding a block.
+     * The gloves the player is <b>holding</b> that are carrying a block.
      *
-     * <p>Ordered main hand first so that {@link #getCarriedTag(ServerPlayer)} - the one the renderer
-     * and the put-down path use - always agrees with what the player is holding.
+     * <p>Main hand first, then off hand - and nothing else.
+     *
+     * <p>This used to walk the whole inventory, which meant a glove parked in any hotbar or backpack
+     * slot kept its block ticking: its plates kept draining, kept shooting, and the player was
+     * "carrying" something they could not see. A glove is only carrying when it is in a hand,
+     * because that is the only time its block is drawn and the only time its plates should run. The
+     * payload itself stays on the stack, so stowing a loaded glove loses nothing - it simply stops
+     * working until it is held again.
      */
     public static java.util.List<ItemStack> carryingGloves(ServerPlayer player) {
         java.util.List<ItemStack> found = new java.util.ArrayList<>();
@@ -86,24 +93,18 @@ public final class CarryManager {
                 && !found.contains(off)) {
             found.add(off);
         }
-        net.minecraft.world.entity.player.Inventory inventory = player.getInventory();
-        for (int i = 0; i < inventory.getContainerSize(); i++) {
-            ItemStack stack = inventory.getItem(i);
-            if (stack.is(com.sidedrain.registry.ModItems.BLOCK_GLOVE.get()) && gloveIsCarrying(stack)
-                    && !found.contains(stack)) {
-                found.add(stack);
-            }
-        }
         return found;
     }
 
-    /** The glove the player is currently carrying with, or {@code null}. */
+    /**
+     * The glove the player is currently carrying with, or {@code null}.
+     *
+     * <p>Main hand wins, then the off hand. Both are "held", so both may carry - but only one of
+     * them is the glove the renderer draws and the put-down path acts on, and that has to be the
+     * main hand when it has one.
+     */
     @Nullable
     public static ItemStack activeGlove(ServerPlayer player) {
-        ItemStack main = player.getMainHandItem();
-        if (main.is(com.sidedrain.registry.ModItems.BLOCK_GLOVE.get()) && gloveIsCarrying(main)) {
-            return main;
-        }
         java.util.List<ItemStack> all = carryingGloves(player);
         return all.isEmpty() ? null : all.get(0);
     }
@@ -142,7 +143,17 @@ public final class CarryManager {
         return ItemStack.of(tag.getCompound("Display"));
     }
 
-    /** A detached container view of the carried block, or {@code null} if it is not a container. */
+    /**
+     * A detached container view of the carried block, or {@code null} if it is not a container.
+     *
+     * <p>Two shapes are tried, in the same order {@code Containers.getContainerAt} uses for a block
+     * in the world: the block entity may <em>be</em> a {@link net.minecraft.world.Container} (a
+     * chest, a hopper), or it may only <em>expose</em> one through the item-handler capability
+     * (Sophisticated Backpacks, Tom's Simple Storage, Refined Storage). Only the first shape used to
+     * be checked, so a carried backpack - which is capability-only - resolved to no container and its
+     * plates went idle. A carried barrel worked and a carried backpack did not, which is a very
+     * confusing pair of behaviours to hit in the same session.
+     */
     @Nullable
     public static net.minecraft.world.Container getCarriedContainer(ServerPlayer player) {
         ServerLevel level = player.serverLevel();
@@ -152,10 +163,13 @@ public final class CarryManager {
             return null;
         }
         BlockEntity entity = buildEntity(player, state, tag.getCompound("Entity"));
+        if (entity == null) {
+            return null;
+        }
         if (entity instanceof net.minecraft.world.Container container) {
             return container;
         }
-        return null;
+        return com.sidedrain.util.Containers.containerForEntity(entity);
     }
 
     /** Writes the detached container's contents back into the carried NBT. */
@@ -190,10 +204,32 @@ public final class CarryManager {
         to.setChanged();
     }
 
+    /**
+     * Rebuilds the carried block's block entity so its container can be read and written.
+     *
+     * <p>A carried block entity is <b>detached</b>: it has a level but no position in that level, so
+     * anything it does through {@code getBlockPos()} or {@code level.getBlockEntity(...)} is wrong.
+     * For a plain chest that does not matter - its contents are its own fields. For a Sophisticated
+     * Backpack it matters a great deal: its item handler is backed by a wrapper that is built in
+     * {@code onLoad()} from the backpack stack, and that wrapper resolves its storage block through
+     * its own position. Loading the NBT alone leaves the wrapper absent, the capability answers
+     * nothing, and the plate clamped onto it has no container to drain - which is exactly why a
+     * carried backpack's plates stopped shooting.
+     *
+     * <p>So the entity is given the payload's position and then told it is loaded, which is the same
+     * sequence a chunk load performs. If a mod throws during that (several validate their wrapper
+     * and refuse to be built twice) the exception is swallowed: a half-built entity still exposes
+     * whatever it managed to load, which is strictly better than dropping the container entirely.
+     */
     @Nullable
     private static BlockEntity buildEntity(ServerPlayer player, BlockState state, CompoundTag entityTag) {
+        return buildEntity(player, player.blockPosition(), state, entityTag);
+    }
+
+    @Nullable
+    private static BlockEntity buildEntity(ServerPlayer player, BlockPos pos, BlockState state,
+                                           CompoundTag entityTag) {
         ServerLevel level = player.serverLevel();
-        BlockPos pos = player.blockPosition();
         BlockEntity entity = null;
         if (state.getBlock() instanceof net.minecraft.world.level.block.EntityBlock entityBlock) {
             entity = entityBlock.newBlockEntity(pos, state);
@@ -204,10 +240,21 @@ public final class CarryManager {
         entity.setLevel(level);
         CompoundTag tag = entityTag.copy();
         tag.remove("id");
+        tag.remove("x");
+        tag.remove("y");
+        tag.remove("z");
         try {
             entity.load(tag);
         } catch (Exception ignored) {
-            return entity;
+            // A mod that refuses to load still gets the fields it managed to read.
+        }
+        // The post-load hook is what most storage mods build their item handler in. The packet path
+        // never calls it, and neither does a bare load(), so a carried backpack had no capability at
+        // all until this was added.
+        try {
+            entity.onLoad();
+        } catch (Exception ignored) {
+            // Same reasoning: a throw here must not cost the whole container.
         }
         return entity;
     }
@@ -219,9 +266,16 @@ public final class CarryManager {
         }
         // This glove must be empty. Another glove holding a block is none of its business: each
         // glove carries independently, so "already carrying" must not block a second glove.
+        //
+        // Either hand may lift. Picking up only from the main hand made an off-hand glove look
+        // broken: the key was accepted on the client, nothing happened on the server, and the
+        // player had no way to tell why.
         ItemStack glove = player.getMainHandItem();
         if (!glove.is(com.sidedrain.registry.ModItems.BLOCK_GLOVE.get()) || gloveIsCarrying(glove)) {
-            return false;
+            glove = player.getOffhandItem();
+            if (!glove.is(com.sidedrain.registry.ModItems.BLOCK_GLOVE.get()) || gloveIsCarrying(glove)) {
+                return false;
+            }
         }
         if (!level.isLoaded(pos) || !level.mayInteract(player, pos)) {
             return false;
@@ -514,7 +568,25 @@ public final class CarryManager {
         }
         try {
             level.setBlock(pos, carried, Block.UPDATE_ALL);
-            if (blockTag.contains("Entity", 10)) {
+        } catch (RuntimeException failure) {
+            // A modded block whose state refuses to be placed must not lock the glove, and must not
+            // take the plates down with it: nothing was placed, so there is nothing to attach to.
+            com.sidedrain.SideDrain.LOGGER.warn("Could not place the carried block at {}", pos, failure);
+            clearCarry(player, owner);
+            return true;
+        }
+        // The block entity is loaded in its own guarded step, and it is critical that a failure here
+        // cannot stop the plates from being reattached below.
+        //
+        // This was the backpack bug. A Sophisticated Backpacks backpack validates its whole storage
+        // wrapper when its block entity loads, and it can throw while doing it - on a backpack whose
+        // upgrade data references something that is not installed, for instance. That throw used to
+        // bubble out of the single try block that wrapped "place the block, load its entity,
+        // reattach the plates", so the backpack was placed and the plates that had been packed away
+        // with it were never restored. They were not merely invisible: the payload had already been
+        // detached from the world during pickup, so once the glove was cleared they ceased to exist.
+        if (blockTag.contains("Entity", 10)) {
+            try {
                 BlockEntity blockEntity = level.getBlockEntity(pos);
                 if (blockEntity != null) {
                     CompoundTag entityTag = blockTag.getCompound("Entity").copy();
@@ -525,20 +597,33 @@ public final class CarryManager {
                     blockEntity.load(entityTag);
                     blockEntity.setChanged();
                 }
+            } catch (RuntimeException failure) {
+                // The block is in the world and the plates still come back; only the carried
+                // contents were rejected, and reporting that is all that can be done.
+                com.sidedrain.SideDrain.LOGGER.warn(
+                        "Placed the carried block at {} but its block entity rejected its data", pos, failure);
             }
-            // Put the attached side drain plates back where they were.
-            if (blockTag.contains("Plates", 9)) {
+        }
+        // Put the attached side drain plates back where they were. Always runs, even if the block
+        // entity above failed, because the plates are independent blocks that only happen to sit on
+        // this host's faces - and they carry the player's items.
+        if (blockTag.contains("Plates", 9)) {
+            try {
                 com.sidedrain.util.CarryPayload.reattachPlates(level, pos, blockTag.getList("Plates", 10));
+            } catch (RuntimeException failure) {
+                com.sidedrain.SideDrain.LOGGER.warn("Could not reattach the side drain plates at {}", pos, failure);
             }
-            // Rebuild the other half of a two-block structure. The partner is placed at the same
-            // relative offset it had before, and if that cell is blocked the partner is dropped as an
-            // item rather than being silently lost - a bed that is only half placed cannot be slept
-            // in, which is the bug this exists to prevent.
-            if (blockTag.contains("Partner", 10)) {
+        }
+        // Rebuild the other half of a two-block structure. The partner is placed at the same
+        // relative offset it had before, and if that cell is blocked the partner is dropped as an
+        // item rather than being silently lost - a bed that is only half placed cannot be slept
+        // in, which is the bug this exists to prevent.
+        if (blockTag.contains("Partner", 10)) {
+            try {
                 restorePartner(level, pos, blockTag.getCompound("Partner"));
+            } catch (RuntimeException failure) {
+                com.sidedrain.SideDrain.LOGGER.warn("Could not restore the other half of a pair at {}", pos, failure);
             }
-        } catch (Exception exception) {
-            // A modded block whose block entity throws on load must not lock the glove.
         }
         clearCarry(player, owner);
         return true;
@@ -609,12 +694,38 @@ public final class CarryManager {
             return;
         }
         BlockPos pos = player.blockPosition();
-        if (state.getBlock() instanceof net.minecraft.world.level.block.EntityBlock entityBlock) {
-            @SuppressWarnings("unchecked")
-            BlockEntityTicker<BlockEntity> ticker =
-                    (BlockEntityTicker<BlockEntity>) entityBlock.getTicker(level, state, entity.getType());
-            if (ticker != null) {
-                ticker.tick(level, pos, state, entity);
+        // A Side Drain Plate is itself carryable, and that path is separate from the "plates clamped
+        // onto a carried block" path below. A plate held in the hands has no face of a container to
+        // point away from any more, so its stored FACING says nothing about where the player is
+        // looking - bind the carrier's look direction for the duration of the tick, exactly the way
+        // tickPlates does for plates that travel bolted onto a carried block. Without this a plate
+        // lifted on its own kept spitting items along the direction it had before it was picked up.
+        com.sidedrain.block.entity.SideDrainBlockEntity carriedPlate =
+                entity instanceof com.sidedrain.block.entity.SideDrainBlockEntity plate ? plate : null;
+        if (carriedPlate != null) {
+            carriedPlate.setDetachedState(state);
+            // A carried plate is not clamped to anything: its old container is gone with the world
+            // block, and looking one up behind the player would drain an unrelated chest.
+            carriedPlate.setCarriedContainer(null);
+            carriedPlate.setCarriedAim(player.getLookAngle());
+            carriedPlate.setCarriedOrigin(firingPoint(player));
+        }
+        try {
+            if (state.getBlock() instanceof net.minecraft.world.level.block.EntityBlock entityBlock) {
+                @SuppressWarnings("unchecked")
+                BlockEntityTicker<BlockEntity> ticker =
+                        (BlockEntityTicker<BlockEntity>) entityBlock.getTicker(level, state, entity.getType());
+                if (ticker != null) {
+                    ticker.tick(level, pos, state, entity);
+                }
+            }
+        } finally {
+            if (carriedPlate != null) {
+                // Clear them again so neither leaks into the NBT written back below: the plate must
+                // keep the FACING it was placed with, and it must not remember a firing point that
+                // belonged to one player's eyes.
+                carriedPlate.setCarriedAim(null);
+                carriedPlate.setCarriedOrigin(null);
             }
         }
         CompoundTag saved = entity.saveWithoutMetadata();
@@ -628,11 +739,43 @@ public final class CarryManager {
     }
 
     /**
+     * Where a projectile leaves a carried plate, in world space.
+     *
+     * <p>This is vanilla's own answer, not a number of our own. {@code AbstractArrow}'s
+     * living-entity constructor spawns an arrow at
+     * {@code shooter.getX(), shooter.getEyeY() - 0.1, shooter.getZ()}, and {@code BowItem} and
+     * {@code CrossbowItem} both go through it - so a player's own arrow leaves from exactly this
+     * point. Using the same expression is what makes a carried plate's shots start where the
+     * player's shots start, instead of around their knees.
+     *
+     * <p>{@code getEyeY()} already accounts for the crouch pose and for any mount the player is
+     * riding, so a sneaking or mounted player still fires from their actual eyes.
+     */
+    private static Vec3 firingPoint(ServerPlayer player) {
+        return new Vec3(player.getX(), player.getEyeY() - 0.1D, player.getZ());
+    }
+
+    /**
      * Keeps the carried block's Side Drain Plates working.
      *
      * <p>While the block is in the player's hands its plates are not in the world, so they are
-     * rebuilt as detached block entities at the player's position and ticked there. A plate that was
-     * draining the block before it was picked up keeps draining it in your hands.
+     * rebuilt as detached block entities bound to the carried container and ticked there. A plate
+     * that was draining the block before it was picked up keeps draining it in your hands - items
+     * still flow, the weapon still swings, the mode still runs - and everything the plate changes is
+     * written back into the carried NBT at the end of the tick.
+     *
+     * <p>What "active" means here, in order:
+     *
+     * <ol>
+     *   <li>The carried container is resolved <b>once</b> from the carried block itself - the same
+     *       detached view the carry manager already rebuilds each tick - and bound to every plate.
+     *       Without the binding a detached plate has no container to clamp onto and silently idles.</li>
+     *   <li>Each plate then runs its real {@code serverTick}: drain keeps pulling out of the carried
+     *       container and shooting it out of the nozzle, a melee weapon keeps swinging at whatever is
+     *       in front of the plate, leak keeps emptying the plate's own slots.</li>
+     *   <li>Everything both the container and the plates changed is written back, so nothing is lost
+     *       when the block is put back down.</li>
+     * </ol>
      */
     private static void tickPlates(ServerPlayer player, ServerLevel level, BlockPos pos, CompoundTag blockTag) {
         if (!blockTag.contains("Plates", 9)) {
@@ -642,10 +785,34 @@ public final class CarryManager {
         if (plates.isEmpty()) {
             return;
         }
+        // The carried container is the thing every plate is clamped onto. It is the same detached
+        // view the carry manager rebuilds for the block entity tick above, so the plates and the
+        // container stay in step inside a single tick.
+        net.minecraft.world.Container carriedContainer = getCarriedContainer(player);
         java.util.List<com.sidedrain.block.entity.SideDrainBlockEntity> live =
-                com.sidedrain.util.CarryPayload.livePlates(level, pos, plates);
+                com.sidedrain.util.CarryPayload.livePlates(level, pos, plates, carriedContainer);
+        // A carried plate is not on a container face any more, so the FACING it was placed with says
+        // nothing about where the player is pointing. Rebind the aim to the player's look direction
+        // every tick: the plate then fires, ejects and sweeps along where the player is actually
+        // aiming, and turns with them as they move. The stored FACING is untouched - put the block
+        // down and it points where it always did.
+        Vec3 aim = player.getLookAngle();
+        // The plates ride on the carried block, but they fire from the player's hands, so they leave
+        // from the same point the player's own bow would: eye height, minus the small drop vanilla's
+        // AbstractArrow uses. Without this a carried assembly shot from the block's own centre,
+        // which for a carried block is at the player's feet.
+        Vec3 origin = firingPoint(player);
         for (com.sidedrain.block.entity.SideDrainBlockEntity plate : live) {
+            plate.setCarriedAim(aim);
+            plate.setCarriedOrigin(origin);
             com.sidedrain.block.entity.SideDrainBlockEntity.serverTick(level, pos, plate.getBlockState(), plate);
+            plate.setCarriedAim(null);
+            plate.setCarriedOrigin(null);
+        }
+        // The container's own contents may have been changed by the plates (drain takes out, feed
+        // puts in), so write them back into the carried NBT.
+        if (carriedContainer != null) {
+            storeCarriedContainer(player, carriedContainer);
         }
         com.sidedrain.util.CarryPayload.storePlates(plates, live);
     }

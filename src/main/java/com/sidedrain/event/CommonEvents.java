@@ -13,6 +13,9 @@ public final class CommonEvents {
         UtilCommands.onRegisterCommands(event);
     }
 
+    // The crafting-table container events (grid persistence on open/close, spill on break) live in
+    // CraftingTableEvents and are registered directly in the mod constructor on this same bus.
+
     @SubscribeEvent
     public static void onPlayerTick(TickEvent.PlayerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) {

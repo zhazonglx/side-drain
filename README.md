@@ -62,11 +62,62 @@ The collision box rotates with the block through all sixty-four yaw/pitch combin
 
 A plate that pulls items out of a container **from the side** instead of the top. Point it at a chest, a barrel, a hopper, or a modded inventory and it drains.
 
+It clamps onto all six faces of a block, including a crafting table, and it works on storages that
+never implement vanilla's `Container` - Sophisticated Backpacks, Tom's Simple Storage, Refined
+Storage - because it reads their item-handler capability.
+
+### Seven modes
+
+| Mode | 中文 | What it does |
+| --- | --- | --- |
+| Drain | 抽取 | pulls from the container and throws the items out of the nozzle |
+| Feed | 输送 | pushes items from the plate into the container |
+| Collect | 收集 | swallows item entities that land on the plate |
+| Collect + Feed | 收集+输送 | vacuums loose items straight into the container |
+| Drain + Store | 抽存 | pulls from the container and keeps the items in the plate's own 27 slots |
+| Leak | 泄漏 | throws the plate's own 27 slots out of the nozzle |
+| Store + Leak | 抽存+泄漏 | both at once - a buffered pipe from the container, through the plate, out of the nozzle |
+
+**Store + Leak** runs the store half first and the leak half second on the same tick, so a plate that
+filled up on the previous tick still gets to empty itself. That is what makes it a buffer rather than
+a pass-through: the container drains at its own rate and the nozzle fires at the plate's.
+
+A weapon in the projectile slot fires while any of the draining modes runs, so a plate can shoot
+arrows out of the chest it is emptying.
+
+### Picking strategy
+
+Four ways to choose what moves: a single chosen slot, the fullest slot, only items matching a
+nine-slot filter, or no preference at all. Plus **slot-to-slot**, which binds plate slot *i* to
+container slot *i* so the two inventories stay in lockstep.
+
 ---
 
 ## The Block Glove
 
 Bare hands that pick up a **living block** - a block that is still a block, not an item - and carry it around. The block is drawn at full size in first person, hugged against your chest by both arms, and in third person for everyone else.
+
+The glove only works while it is in your **main or off hand**. A glove stowed in a backpack or a
+hotbar slot you are not holding keeps its payload but does nothing - which is what stops a stored
+glove from quietly emptying a chest across the room.
+
+Clamp plates onto a block, then pick the block up, and the plates come with it and keep working.
+
+---
+
+## Controls
+
+Both the wrench and the glove work through **sneak + click**, and both also have a key binding so
+you can do the same thing without holding sneak. The gestures are unchanged; the keys are extra.
+
+| Action | Gesture | Key (default) | 中文 |
+| --- | --- | --- | --- |
+| Tilt block | Sneak + Right click | - | 翻转方块（扳手） |
+| Spin block | Sneak + Left click | `G` | 旋转方块（扳手） |
+| Lift / put down | Sneak + Middle click | `R` | 搬起·放下方块（手套） |
+
+Rebind either key in **Options → Controls → Side Drain**. Every entry is labelled in Chinese and
+English so it can be found by searching in either language.
 
 ---
 
@@ -83,7 +134,7 @@ Tested against the **Closing Song 1.6.5** modpack (298 mods) including Sophistic
 ## Installation
 
 1. Install Minecraft Forge 47.x for 1.20.1.
-2. Drop `sidedrain-1.0.1.jar` into your `mods` folder.
+2. Drop `sidedrain-1.0.3.jar` into your `mods` folder.
 3. Launch.
 
 Client and server both need the mod.
@@ -96,7 +147,7 @@ Client and server both need the mod.
 ./gradlew build
 ```
 
-The jar lands in `build/libs/sidedrain-1.0.1.jar`. Requires JDK 17.
+The jar lands in `build/libs/sidedrain-1.0.3.jar`. Requires JDK 17.
 
 ---
 

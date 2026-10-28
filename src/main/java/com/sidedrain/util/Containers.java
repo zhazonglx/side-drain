@@ -52,6 +52,14 @@ public final class Containers {
                 return held;
             }
         }
+        // A crafting table has no block entity and no capability - its grid lives in the open menu
+        // and, since the plate-crafting integration, in CraftingGridStorage. Handing the plate this
+        // view is what makes a table a container the plate can clamp onto: nine grid slots plus the
+        // craft result on slot ten, which a draining plate pulls out to automate crafting.
+        Container table = CraftingTableContainer.of(level, pos);
+        if (table != null) {
+            return table;
+        }
         // Modded containers that expose their inventory through a capability rather than by
         // implementing Container on the block entity. Sophisticated Backpacks, Tom's Simple Storage
         // terminals and Refined Storage / Applied Energistics style grids all live here: their block
@@ -105,6 +113,31 @@ public final class Containers {
             return null;
         }
         return new ItemHandlerContainer(handler, target);
+    }
+
+    /**
+     * The container a <b>detached</b> block entity exposes through its item-handler capability.
+     *
+     * <p>This is the counterpart of {@link #getContainerAt} for an entity that is not in the world -
+     * a carried block. It deliberately does not go through {@code Level}: a carried entity has no
+     * position to look up, and asking the level for one would find whatever happens to stand behind
+     * the player.
+     *
+     * <p>A modded block entity commonly builds its handler in {@code onLoad}, so the caller has to
+     * have run that hook; a bare {@code load()} is not enough. See
+     * {@code CarryManager.buildEntity}.
+     */
+    @Nullable
+    public static Container containerForEntity(BlockEntity entity) {
+        net.minecraftforge.common.capabilities.Capability<net.minecraftforge.items.IItemHandler> cap =
+                net.minecraftforge.common.capabilities.ForgeCapabilities.ITEM_HANDLER;
+        // Null side first: that is the "any side" view, which is the whole inventory. A specific
+        // face may expose only an input or an output, which would silently hide half the slots.
+        net.minecraftforge.items.IItemHandler handler = entity.getCapability(cap, null).orElse(null);
+        if (handler == null || handler.getSlots() <= 0) {
+            return null;
+        }
+        return new ItemHandlerContainer(handler, entity);
     }
 
     /** Read/write {@link Container} view over a Forge {@code IItemHandler}. */

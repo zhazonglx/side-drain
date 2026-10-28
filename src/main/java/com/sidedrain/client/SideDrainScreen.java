@@ -33,9 +33,9 @@ public class SideDrainScreen extends AbstractContainerScreen<SideDrainMenu> {
      * (235). The caption therefore has to move down while the grid is on screen, otherwise it is
      * drawn straight through the bottom row of filter slots.
      */
-    private static final int INVENTORY_LABEL_Y = 222;
+    private static final int INVENTORY_LABEL_Y = 260;
     /** Caption row used instead while the filter grid is visible; clears the grid and the slots. */
-    private static final int INVENTORY_LABEL_Y_FILTERED = 240;
+    private static final int INVENTORY_LABEL_Y_FILTERED = 278;
     /** Where the plate's own name is drawn, on its own band above the storage grid. */
     private static final int TITLE_Y = SideDrainMenu.TITLE_Y;
 
@@ -59,6 +59,10 @@ public class SideDrainScreen extends AbstractContainerScreen<SideDrainMenu> {
     private Button weaponModeButton;
     private Button targetPrevButton;
     private Button targetNextButton;
+    private Button meleePlayersButton;
+    private Button meleeMonstersButton;
+    private Button meleeFriendliesButton;
+    private Button meleeNeutralsButton;
 
     public SideDrainScreen(SideDrainMenu menu, Inventory inventory, Component title) {
         super(menu, inventory, title);
@@ -92,6 +96,16 @@ public class SideDrainScreen extends AbstractContainerScreen<SideDrainMenu> {
                 .bounds(this.leftPos + 8, this.topPos + SideDrainMenu.FILTER_Y + 8, 16, 18).build());
         this.targetNextButton = this.addRenderableWidget(Button.builder(Component.literal(">"), button -> this.sendButton(2))
                 .bounds(this.leftPos + 26, this.topPos + SideDrainMenu.FILTER_Y + 8, 16, 18).build());
+        // The four melee targeting switches, shown while the weapon toggle is on. Each one flips its
+        // own tag on the plate; a tag that is off makes that whole category immune to the plate.
+        this.meleePlayersButton = this.addRenderableWidget(Button.builder(meleeLabel(0), b -> this.sendButton(8))
+                .bounds(this.leftPos + 8, this.topPos + SideDrainMenu.TAG_ROW_Y, 40, 18).build());
+        this.meleeMonstersButton = this.addRenderableWidget(Button.builder(meleeLabel(1), b -> this.sendButton(9))
+                .bounds(this.leftPos + 51, this.topPos + SideDrainMenu.TAG_ROW_Y, 40, 18).build());
+        this.meleeFriendliesButton = this.addRenderableWidget(Button.builder(meleeLabel(2), b -> this.sendButton(10))
+                .bounds(this.leftPos + 94, this.topPos + SideDrainMenu.TAG_ROW_Y, 40, 18).build());
+        this.meleeNeutralsButton = this.addRenderableWidget(Button.builder(meleeLabel(3), b -> this.sendButton(11))
+                .bounds(this.leftPos + 137, this.topPos + SideDrainMenu.TAG_ROW_Y, 40, 18).build());
         this.updateWidgetVisibility();
     }
 
@@ -103,6 +117,39 @@ public class SideDrainScreen extends AbstractContainerScreen<SideDrainMenu> {
         if (this.targetNextButton != null) {
             this.targetNextButton.visible = slotMode;
         }
+        // The targeting switches only matter when the plate is allowed to use its weapon at all, and
+        // only while the weapon slot actually holds something: a plate with an empty weapon slot has
+        // nothing to swing, so four dead switches would just invite the "these do nothing" report.
+        boolean tagsVisible = this.menu.isUseWeapon() && this.menu.getDispenserDataWeapon() != 0;
+        if (this.meleePlayersButton != null) {
+            this.meleePlayersButton.visible = tagsVisible;
+        }
+        if (this.meleeMonstersButton != null) {
+            this.meleeMonstersButton.visible = tagsVisible;
+        }
+        if (this.meleeFriendliesButton != null) {
+            this.meleeFriendliesButton.visible = tagsVisible;
+        }
+        if (this.meleeNeutralsButton != null) {
+            this.meleeNeutralsButton.visible = tagsVisible;
+        }
+    }
+
+    private Component meleeLabel(int which) {
+        boolean on = switch (which) {
+            case 0 -> (this.menu.getMeleeTagBits() & 1) != 0;
+            case 1 -> (this.menu.getMeleeTagBits() & 2) != 0;
+            case 2 -> (this.menu.getMeleeTagBits() & 4) != 0;
+            default -> (this.menu.getMeleeTagBits() & 8) != 0;
+        };
+        String key = switch (which) {
+            case 0 -> "gui.sidedrain.melee.players";
+            case 1 -> "gui.sidedrain.melee.monsters";
+            case 2 -> "gui.sidedrain.melee.friendly";
+            default -> "gui.sidedrain.melee.neutral";
+        };
+        return Component.translatable(key).append(": ")
+                .append(Component.translatable(on ? "gui.sidedrain.melee.on" : "gui.sidedrain.melee.off"));
     }
 
     private void sendButton(int id) {
@@ -130,7 +177,26 @@ public class SideDrainScreen extends AbstractContainerScreen<SideDrainMenu> {
     }
 
     private Component powerLabel() {
+        // The enabled switch shares this button with the status line, so the label has to stay short
+        // enough for the 78px button: "已激活" or "已关闭" alone fits, and the launcher mode gets its
+        // own readout drawn under the weapon slot instead of being crammed in here.
         return Component.translatable(this.menu.isEnabled() ? "gui.sidedrain.on" : "gui.sidedrain.off");
+    }
+
+    /**
+     * One line naming the active launcher body, drawn under the weapon slot.
+     *
+     * <p>The dispenser used to be invisible in the panel: a plate with one and a plate without one
+     * looked the same, and the only way to find out whether the plate was in launcher mode was to
+     * watch what came out of it. Naming the mode, the count and the effect makes the slot's whole
+     * point readable at a glance.
+     */
+    private Component dispenserLabel() {
+        int power = this.menu.getDispenserPower();
+        if (power <= 0) {
+            return Component.translatable("gui.sidedrain.dispenser.none");
+        }
+        return Component.translatable("gui.sidedrain.dispenser.active", power);
     }
 
     private Component rangeLabel() {
@@ -227,6 +293,12 @@ public class SideDrainScreen extends AbstractContainerScreen<SideDrainMenu> {
         // The weapon caption is short and sits above its slot, clear of the filter caption on the left.
         graphics.drawString(this.font, Component.translatable("gui.sidedrain.weapon"),
                 SideDrainMenu.WEAPON_X, SideDrainMenu.CAPTION_Y, 0x6C3A1E, false);
+        // The launcher readout goes directly under the weapon slot. That band is empty: the filter
+        // grid ends at x = 8 + 3 * 18 = 62, so anything drawn from x = 78 rightwards is clear of it,
+        // and nothing else is drawn below the slot on this row.
+        graphics.drawString(this.font, dispenserLabel(),
+                SideDrainMenu.WEAPON_X, SideDrainMenu.WEAPON_Y + 22,
+                this.menu.getDispenserPower() > 0 ? 0x8A2B00 : 0x555555, false);
 
         if (this.menu.getStrategy() == SideDrainBlockEntity.STRATEGY_SLOT) {
             // On its own row, full width, so it can never overlap the weapon caption or the slots.
@@ -262,6 +334,18 @@ public class SideDrainScreen extends AbstractContainerScreen<SideDrainMenu> {
         }
         if (this.weaponModeButton != null) {
             this.weaponModeButton.setMessage(weaponModeLabel());
+        }
+        if (this.meleePlayersButton != null) {
+            this.meleePlayersButton.setMessage(meleeLabel(0));
+        }
+        if (this.meleeMonstersButton != null) {
+            this.meleeMonstersButton.setMessage(meleeLabel(1));
+        }
+        if (this.meleeFriendliesButton != null) {
+            this.meleeFriendliesButton.setMessage(meleeLabel(2));
+        }
+        if (this.meleeNeutralsButton != null) {
+            this.meleeNeutralsButton.setMessage(meleeLabel(3));
         }
         this.updateWidgetVisibility();
         this.renderBackground(graphics);

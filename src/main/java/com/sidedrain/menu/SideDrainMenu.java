@@ -45,7 +45,11 @@ public class SideDrainMenu extends AbstractContainerMenu {
     public static final int DATA_TARGET_SIZE = 6;
     public static final int DATA_RANGE = 7;
     public static final int DATA_USE_WEAPON = 8;
-    public static final int DATA_COUNT = 9;
+    /** How many dispensers the weapon slot holds; 0 when the plate has no launcher body installed. */
+    public static final int DATA_DISPENSER = 9;
+    /** The four melee targeting tags packed into one bitmask: bit0 players, 1 monsters, 2 friendlies, 3 neutrals. */
+    public static final int DATA_MELEE_TAGS = 10;
+    public static final int DATA_COUNT = 11;
 
     /**
      * Pixel layout, mirrored by the screen.
@@ -60,16 +64,18 @@ public class SideDrainMenu extends AbstractContainerMenu {
     public static final int BUTTON_ROW_2 = 118;
     public static final int BUTTON_ROW_3 = 140;
     /** The target-slot readout lives on its own row, never over the captions or the slots. */
-    public static final int TARGET_ROW_Y = 160;
-    public static final int CAPTION_Y = 170;
+    public static final int TARGET_ROW_Y = 162;
+    /** The four melee targeting switches, shown while the weapon toggle is on. */
+    public static final int TAG_ROW_Y = 184;
+    public static final int CAPTION_Y = 208;
     public static final int FILTER_X = 8;
-    public static final int FILTER_Y = 182;
+    public static final int FILTER_Y = 220;
     public static final int WEAPON_X = 78;
-    public static final int WEAPON_Y = 182;
-    /** The filter grid ends at 160 + 54 = 214, so the inventory starts well clear of it. */
-    public static final int PLAYER_Y = 254;
-    public static final int HOTBAR_Y = 312;
-    public static final int IMAGE_HEIGHT = 334;
+    public static final int WEAPON_Y = 220;
+    /** The filter grid ends at 220 + 54 = 274, so the inventory starts well clear of it. */
+    public static final int PLAYER_Y = 292;
+    public static final int HOTBAR_Y = 350;
+    public static final int IMAGE_HEIGHT = 372;
 
     private static final int STORAGE_START = 0;
     private static final int FILTER_START = STORAGE_START + STORAGE_SLOTS;
@@ -126,9 +132,10 @@ public class SideDrainMenu extends AbstractContainerMenu {
         this.addSlot(new Slot(weapon, 0, WEAPON_X, WEAPON_Y) {
             @Override
             public boolean mayPlace(ItemStack stack) {
-                // Both ranged launchers and melee weapons are accepted: the plate either shoots or
-                // swings, depending on what is loaded.
-                return com.sidedrain.util.ProjectileLauncher.isLauncher(stack)
+                // Every ranged weapon the plate can drive - bows, crossbows, modded staves, spell
+                // books, guns - plus the melee weapons the plate can swing, depending on what is
+                // loaded.
+                return com.sidedrain.util.ProjectileLauncher.isRangedWeapon(stack)
                         || com.sidedrain.util.MeleeAttacker.isMelee(stack);
             }
         });
@@ -189,6 +196,52 @@ public class SideDrainMenu extends AbstractContainerMenu {
     /** Whether the plate may swing or fire the weapon in its weapon slot. */
     public boolean isUseWeapon() {
         return this.data.get(DATA_USE_WEAPON) != 0;
+    }
+
+    /**
+     * How many dispensers the weapon slot holds, or 0 when there is no launcher body.
+     *
+     * <p>Only used to label the panel. The plate does not need the panel to know - it reads its own
+     * weapon stack - but the player does: with a dispenser installed the plate shoots its cargo
+     * instead of dropping it, and the speed and the firing rate both rise with the count.
+     */
+    public int getDispenserPower() {
+        return this.data.get(DATA_DISPENSER);
+    }
+
+    /** Whether the weapon slot holds anything the plate can use, melee or ranged. */
+    public int getDispenserDataWeapon() {
+        return this.data.get(DATA_WEAPON);
+    }
+
+    /**
+     * The four melee targeting switches, for the screen's labels.
+     *
+     * <p>These read the {@link ContainerData} bitmask, not the block entity. On the client the
+     * {@code container} field is a {@link SimpleContainer} stub - the real plate never crosses the
+     * network - so an {@code instanceof SideDrainBlockEntity} test silently failed on the client and
+     * every switch read {@code false} no matter what the server had stored, which is exactly why the
+     * switches looked dead. The data slot is the only channel that actually crosses.
+     */
+    public boolean isMeleePlayers() {
+        return (this.data.get(DATA_MELEE_TAGS) & 1) != 0;
+    }
+
+    public boolean isMeleeMonsters() {
+        return (this.data.get(DATA_MELEE_TAGS) & 2) != 0;
+    }
+
+    public boolean isMeleeFriendlies() {
+        return (this.data.get(DATA_MELEE_TAGS) & 4) != 0;
+    }
+
+    public boolean isMeleeNeutrals() {
+        return (this.data.get(DATA_MELEE_TAGS) & 8) != 0;
+    }
+
+    /** The four melee targeting tags as one bitmask, for the screen's switch labels. */
+    public int getMeleeTagBits() {
+        return this.data.get(DATA_MELEE_TAGS);
     }
 
     /** True while the filter strategy is selected, which is when the filter grid is usable. */

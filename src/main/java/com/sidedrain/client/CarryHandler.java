@@ -179,18 +179,30 @@ public final class CarryHandler {
         CARRYING.clear();
     }
 
-    /** True when the player is holding the Block Glove, which is what unlocks the carry key. */
+    /**
+     * True when the player is holding the Block Glove in either hand.
+     *
+     * <p>Main hand only was wrong: an off-hand glove is held and drawn just the same, and the server
+     * accepts a lift from either hand. Refusing on the client while the server would have accepted
+     * is the worst of both - the key looks dead.
+     */
     public static boolean hasGlove(Player player) {
-        return player.getMainHandItem().is(ModItems.BLOCK_GLOVE.get());
+        return player.getMainHandItem().is(ModItems.BLOCK_GLOVE.get())
+                || player.getOffhandItem().is(ModItems.BLOCK_GLOVE.get());
     }
 
     /**
-     * Called when the pick-block key is pressed while sneaking. Returns true when handled.
+     * Called when the carry gesture is performed. Returns true when handled.
      *
-     * <p>The action is decided by the <b>main hand glove's own</b> payload: an empty glove lifts, a
-     * full glove puts down. That is what lets two gloves carry two blocks - lifting with the empty
-     * one no longer silently puts down what the other is holding, which is what the old player-wide
+     * <p>The action is decided by the <b>held glove's own</b> payload: an empty glove lifts, a full
+     * glove puts down. That is what lets two gloves carry two blocks - lifting with the empty one no
+     * longer silently puts down what the other is holding, which is what the old player-wide
      * "already carrying" test did.
+     *
+     * <p>Sneak is required for the <b>gesture</b> (sneak + middle click), which is what keeps a
+     * plain middle click doing vanilla pick-block. The {@code R} key binding reaches this same
+     * method without sneaking - it is an addition, not a replacement - and the check is therefore
+     * skipped for it by {@link #onBoundKey()}.
      */
     public static boolean onPickBlock() {
         Minecraft minecraft = Minecraft.getInstance();
@@ -201,6 +213,26 @@ public final class CarryHandler {
         if (!player.isShiftKeyDown()) {
             return false;
         }
+        return carryAction(minecraft, player);
+    }
+
+    /**
+     * The same carry action, for the bound key.
+     *
+     * <p>Identical except for the sneak requirement: a bound key is already an explicit intent, so
+     * demanding sneak on top of it would just be a second thing to hold.
+     */
+    public static boolean onBoundKey() {
+        Minecraft minecraft = Minecraft.getInstance();
+        LocalPlayer player = minecraft.player;
+        if (player == null || minecraft.level == null) {
+            return false;
+        }
+        return carryAction(minecraft, player);
+    }
+
+    /** The shared body of both entry points. */
+    private static boolean carryAction(Minecraft minecraft, LocalPlayer player) {
         ItemStack main = player.getMainHandItem();
         ItemStack off = player.getOffhandItem();
         // The glove that will act: a carrying glove takes priority so a full hand can always empty

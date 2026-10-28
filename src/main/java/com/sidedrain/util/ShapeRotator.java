@@ -41,13 +41,24 @@ public final class ShapeRotator {
     /** The block centre every rotation turns about, in block units. */
     private static final double CENTRE = 0.5D;
 
-    /** Bounded so a world full of distinct modded shapes cannot grow the cache without limit. */
-    private static final int CACHE_LIMIT = 2048;
+    /**
+     * Bounded so a world full of distinct modded shapes cannot grow the cache without limit.
+     *
+     * <p>Raised from 2048 once the warm-up was fixed to fill real entries. Each wrapped block at
+     * each of its 48 non-trivial angles needs a coarse and an exact entry, so a modest build - say
+     * forty rotated chests - is already several thousand entries. The old limit stopped accepting
+     * new entries at that point and the cache went permanently cold for everything added later,
+     * which is far worse than holding a few megabytes of immutable geometry.
+     */
+    private static final int CACHE_LIMIT = 16384;
 
     private static final Map<Key, VoxelShape> CACHE = new ConcurrentHashMap<>();
 
     /** {@code VoxelShape} has identity equality, which is exactly what is wanted here. */
-    private record Key(VoxelShape source, int operation, int turns) {
+    private record Key(VoxelShape source, int operation, int turns, int cells) {
+        Key(VoxelShape source, int operation, int turns) {
+            this(source, operation, turns, 0);
+        }
     }
 
     private static final int OP_ROTATE_X = 0;
@@ -221,6 +232,25 @@ public final class ShapeRotator {
      * blocks that are gone. Never called during normal play, because wiping it mid-game turns every
      * following query into a rebuild on the server thread.
      */
+    /**
+     * Puts a built shape in the cache, replacing the oldest entry when the cache is full.
+     *
+     * <p>This used to be an unconditional "only store while under the limit". Once the map reached
+     * its bound it silently stopped accepting anything, so every shape added afterwards rebuilt on
+     * every single query - the worst possible outcome for the server thread, and one that a full
+     * but useful cache would never have caused. Evicting one arbitrary entry keeps the cache
+     * working: the evicted shape rebuilds once, everything else stays warm.
+     */
+    private static void store(Key key, VoxelShape shape) {
+        if (CACHE.size() >= CACHE_LIMIT) {
+            java.util.Iterator<Key> it = CACHE.keySet().iterator();
+            if (it.hasNext()) {
+                CACHE.remove(it.next());
+            }
+        }
+        CACHE.put(key, shape);
+    }
+
     public static void clearCache() {
         CACHE.clear();
     }
@@ -236,9 +266,7 @@ public final class ShapeRotator {
         // storm on the server thread is exactly what froze the game. A full map simply stops
         // accepting new entries; the ones already there keep being served, and a rare miss is
         // recomputed on demand.
-        if (CACHE.size() < CACHE_LIMIT) {
-            CACHE.put(key, built);
-        }
+        store(key, built);
         return built;
     }
 
@@ -350,6 +378,51 @@ public final class ShapeRotator {
         return box(minX, minY, minZ, maxX, maxY, maxZ);
     }
 
+    /**
+     * Rotates about both axes on a deliberately coarse grid, for a <b>collision</b> shape.
+     *
+     * <p>A collision shape is a solid, and a solid only needs its surface to be right. The exact
+     * {@link #rotateAboutXY} path voxelises at 1/16 of a block, which for a 45/45 turn is about
+     * eighteen thousand cell tests and - after the runs are emitted - several hundred boxes. That is
+     * the right answer for an outline and far too much for a collider: every entity sweep against
+     * the block walks all of those boxes, and a wall of rotated blocks multiplies that by the number
+     * of blocks the entity is touching. That is the "performance drops after flipping several
+     * blocks" report.
+     *
+     * <p>At four cells per block the same rotation is a staircase of four steps - exactly the shape a
+     * vanilla stair is made of, and what the player asked for - and costs about sixty-four times
+     * less to build and to sweep. It is also a <em>staircase</em> rather than a set of pillars: the
+     * runs are emitted along x, so each step is one long box spanning the block, not a column.
+     *
+     * <p>Quarter turns are exact at any resolution and are simply forwarded to the exact path, so a
+     * rotated block that has not been tilted diagonally keeps its precise box.
+     */
+    public static VoxelShape rotateAboutXYCoarse(VoxelShape shape, double xDegrees, double yDegrees) {
+        int xSteps = (int) java.lang.Math.round(normalise(xDegrees) / 45.0D) & 7;
+        int ySteps = (int) java.lang.Math.round(normalise(yDegrees) / 45.0D) & 7;
+        if (xSteps == 0 && ySteps == 0) {
+            return shape;
+        }
+        // Both angles on a quarter turn: the box stays axis aligned, so the exact path is free.
+        if (xSteps % 2 == 0 && ySteps % 2 == 0) {
+            return rotateAboutXY(shape, xDegrees, yDegrees);
+        }
+        return cachedCombined(shape, xSteps, ySteps, COLLISION_CELLS);
+    }
+
+    /** Same as {@link #rotateAboutXY} but on an explicit grid; {@code 0} means the adaptive one. */
+    public static VoxelShape rotateAboutXY(VoxelShape shape, double xDegrees, double yDegrees, int cells) {
+        int xSteps = (int) java.lang.Math.round(normalise(xDegrees) / 45.0D) & 7;
+        int ySteps = (int) java.lang.Math.round(normalise(yDegrees) / 45.0D) & 7;
+        if (xSteps == 0 && ySteps == 0) {
+            return shape;
+        }
+        if (cells <= 0) {
+            return rotateAboutXY(shape, xDegrees, yDegrees);
+        }
+        return cachedCombined(shape, xSteps, ySteps, cells);
+    }
+
     public static VoxelShape rotateAboutXY(VoxelShape shape, double xDegrees, double yDegrees) {
         int xSteps = (int) java.lang.Math.round(normalise(xDegrees) / 45.0D) & 7;
         int ySteps = (int) java.lang.Math.round(normalise(yDegrees) / 45.0D) & 7;
@@ -365,19 +438,33 @@ public final class ShapeRotator {
     }
 
     private static final int OP_ANGLE_XY = 6;
+    /** Same as {@link #OP_ANGLE_XY} but on a deliberately coarse grid; used for collision. */
+    private static final int OP_ANGLE_XY_COARSE = 7;
 
     private static VoxelShape cachedCombined(VoxelShape shape, int xSteps, int ySteps) {
-        // The key packs both angles: xSteps and ySteps are each 0..7, so a 6-bit key suffices.
+        return cachedCombined(shape, xSteps, ySteps, 0);
+    }
+
+    /**
+     * Computes (or reuses) a two-axis rotation at an explicit grid resolution.
+     *
+     * @param cells cells per block, or {@code 0} for the adaptive resolution
+     */
+    private static VoxelShape cachedCombined(VoxelShape shape, int xSteps, int ySteps, int cells) {
+        // The key packs both angles: xSteps and ySteps are each 0..7, so a 6-bit key suffices. The
+        // coarse path is a separate operation so the two resolutions can never collide.
         int packed = (xSteps << 3) | ySteps;
-        Key key = new Key(shape, OP_ANGLE_XY, packed);
+        // The cell count belongs in the key. Without it every resolution shared the first entry
+        // computed, so asking for a coarse collider after an exact outline silently returned the
+        // outline - the coarse path would never have taken effect at all.
+        Key key = cells == 0 ? new Key(shape, OP_ANGLE_XY, packed)
+                : new Key(shape, OP_ANGLE_XY_COARSE, packed, cells);
         VoxelShape hit = CACHE.get(key);
         if (hit != null) {
             return hit;
         }
-        VoxelShape built = computeAngleXY(shape, xSteps, ySteps);
-        if (CACHE.size() < CACHE_LIMIT) {
-            CACHE.put(key, built);
-        }
+        VoxelShape built = computeAngleXY(shape, xSteps, ySteps, cells);
+        store(key, built);
         return built;
     }
 
@@ -413,7 +500,15 @@ public final class ShapeRotator {
      * block at {@code N=16} is ~265 cells but collapses to a few dozen runs, and the staircase still
      * has sixteen steps so the diagonal is smooth.
      */
-    private static VoxelShape voxelRotate(java.util.List<AABB> source, double xRad, double yRad) {
+    private static VoxelShape voxelRotate(java.util.List<AABB> source, double xRad, double yRad,
+                                          int cells) {
+        // A coarse grid is a COLLIDER, so it must never under-cover. Testing cell centres against
+        // the source boxes loses the thin sliver at the tip of a 45 degree corner - at four cells a
+        // rotated cube came out 0.24 of a block short on each side, which is a hole a player can
+        // walk into. Growing the source by half a cell before the test turns that into at most half
+        // a cell of over-cover, which is exactly what a stair's own collider does and is the safe
+        // direction for collision.
+        double grow = cells > 0 ? 0.5D / cells : 0.0D;
         double cx = java.lang.Math.cos(xRad);
         double sx = java.lang.Math.sin(xRad);
         double cy = java.lang.Math.cos(yRad);
@@ -455,7 +550,8 @@ public final class ShapeRotator {
         // the work eightfold and costs one step of staircase sharpness - which for a shape that large
         // is not visible anyway, because the player is looking at the whole machine, not at the
         // one-pixel lip of its collision box.
-        final int cellsPerBlock = resolutionFor(maxX - minX, maxY - minY, maxZ - minZ);
+        final int cellsPerBlock = cells > 0 ? cells
+                : resolutionFor(maxX - minX, maxY - minY, maxZ - minZ);
         int nx = java.lang.Math.max(1, (int) java.lang.Math.ceil((maxX - minX) * cellsPerBlock));
         int ny = java.lang.Math.max(1, (int) java.lang.Math.ceil((maxY - minY) * cellsPerBlock));
         int nz = java.lang.Math.max(1, (int) java.lang.Math.ceil((maxZ - minZ) * cellsPerBlock));
@@ -539,9 +635,9 @@ public final class ShapeRotator {
                         double uy = dy * cx + uz * sx;
                         double uz2 = -dy * sx + uz * cx;
                         double ox = ux + CENTRE, oy = uy + CENTRE, oz = uz2 + CENTRE;
-                        if (ox >= box.minX - EPS && ox <= box.maxX + EPS
-                                && oy >= box.minY - EPS && oy <= box.maxY + EPS
-                                && oz >= box.minZ - EPS && oz <= box.maxZ + EPS) {
+                        if (ox >= box.minX - EPS - grow && ox <= box.maxX + EPS + grow
+                                && oy >= box.minY - EPS - grow && oy <= box.maxY + EPS + grow
+                                && oz >= box.minZ - EPS - grow && oz <= box.maxZ + EPS + grow) {
                             filled.set(idx);
                         }
                     }
@@ -668,6 +764,15 @@ public final class ShapeRotator {
     /** Cells per block for the voxel path. */
     private static final int VOXEL_RESOLUTION = 16;
 
+    /**
+     * Cells per block for a collision shape.
+     *
+     * <p>Four steps across a block is the resolution a vanilla stair uses, and it is what the
+     * collider is built at. The outline keeps the full sixteen - see
+     * {@link #rotateAboutXYCoarse} for why the two differ.
+     */
+    private static final int COLLISION_CELLS = 4;
+
     /** Floor on the adaptive resolution - below this the staircase stops reading as a diagonal. */
     private static final int MIN_RESOLUTION = 4;
 
@@ -718,7 +823,7 @@ public final class ShapeRotator {
                 || bounds.getZsize() < EDGE_BAND;
     }
 
-    private static VoxelShape computeAngleXY(VoxelShape shape, int xSteps, int ySteps) {
+    private static VoxelShape computeAngleXY(VoxelShape shape, int xSteps, int ySteps, int cells) {
         double xRad = java.lang.Math.toRadians(xSteps * 45.0D);
         double yRad = java.lang.Math.toRadians(ySteps * 45.0D);
         // Voxelise rather than bounding each rotated box.
@@ -729,7 +834,7 @@ public final class ShapeRotator {
         // exactly the regression this replaces. A voxel shape is a grid, so the diagonal has to be a
         // staircase of cells; voxelRotate builds that staircase directly, in one pass, and emits
         // runs so the box count stays manageable.
-        return voxelRotate(boundedSource(shape), xRad, yRad);
+        return voxelRotate(boundedSource(shape), xRad, yRad, cells);
     }
 
     private static VoxelShape angle(VoxelShape shape, int operation, double degrees) {

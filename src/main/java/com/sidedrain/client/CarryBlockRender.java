@@ -61,10 +61,25 @@ public final class CarryBlockRender {
             BlockRenderDispatcher dispatcher = minecraft.getBlockRenderer();
             net.minecraft.client.resources.model.BakedModel model = dispatcher.getBlockModel(state);
             var random = net.minecraft.util.RandomSource.create(42L);
+            // Resolve the block colour here, once per draw.
+            //
+            // The vanilla renderModel path never consults BlockColors: its tint multipliers are the
+            // raw R/G/B floats the caller passes, and the AO tesselation path - the one the world
+            // uses - is what calls blockColors.getColor per quad. Passing 1,1,1 through renderModel
+            // therefore drew every tinted quad untinted: a carried grass block or a carried leaves
+            // block came out white, the same symptom the rotated carrier had before its own colour
+            // delegation existed. The colour is asked from the state itself at a real position of
+            // that state, so biome tints and modded handlers both resolve correctly.
+            int tint = level != null
+                    ? minecraft.getBlockColors().getColor(state, level, net.minecraft.core.BlockPos.ZERO, -1)
+                    : minecraft.getBlockColors().getColor(state, null, null, -1);
+            float red = (tint >> 16 & 0xFF) / 255.0F;
+            float green = (tint >> 8 & 0xFF) / 255.0F;
+            float blue = (tint & 0xFF) / 255.0F;
             for (net.minecraft.client.renderer.RenderType type
                     : model.getRenderTypes(state, random, net.minecraftforge.client.model.data.ModelData.EMPTY)) {
                 dispatcher.getModelRenderer().renderModel(poseStack.last(), buffers.getBuffer(type), state,
-                        model, 1.0F, 1.0F, 1.0F, packedLight, OverlayTexture.NO_OVERLAY,
+                        model, red, green, blue, packedLight, OverlayTexture.NO_OVERLAY,
                         net.minecraftforge.client.model.data.ModelData.EMPTY, type);
             }
             return true;

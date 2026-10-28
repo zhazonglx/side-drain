@@ -70,8 +70,33 @@ public class RotatedBlockEntity extends BlockEntity implements Nameable {
         this.inner = state;
         // The wrapped state is what the model rotates, so the renderer has to be told when it changes
         // or the mesher keeps drawing the previous block's geometry.
-        this.requestModelDataUpdate();
+        this.refreshModel();
         this.setChanged();
+    }
+
+    /**
+     * Re-captures the model data this carrier draws from, and re-meshes its section.
+     *
+     * <p>This is the client half of the rotated-block texture bug, and it is subtle enough to be
+     * worth spelling out. The wrapped state reaches a client through
+     * {@code ClientboundBlockEntityDataPacket}, whose handler calls
+     * {@code onDataPacket -> load}. Forge refreshes the model data cache from
+     * {@code BlockEntity.onLoad}, which the <b>packet path never calls</b> - {@code onLoad} runs when
+     * a block entity is first added or when its chunk loads from disk. So a carrier that was placed
+     * empty and then wrapped kept the {@code ModelData.EMPTY} that was captured for it at empty, and
+     * {@code RotatedBlockModel} was asked to draw an air state: it answered with no quads at all,
+     * which is a block with no texture, or with whatever state it had captured before, which is the
+     * previous texture drawn where the new one should be. Rotating the same block twice showed both
+     * at once, because the mesher had been fed two different states across two frames.
+     *
+     * <p>The actual work is in {@link com.sidedrain.client.ClientModelRefresh}, which is client-only
+     * code: this class is common and is loaded on a dedicated server, so it must not reference a
+     * client class directly. The guard below means the reference is only ever resolved on a client.
+     */
+    private void refreshModel() {
+        if (this.level != null && this.level.isClientSide) {
+            com.sidedrain.client.ClientModelRefresh.request(this);
+        }
     }
 
     /**
@@ -198,6 +223,10 @@ public class RotatedBlockEntity extends BlockEntity implements Nameable {
         this.innerName = tag.getString("InnerName");
         this.cachedEntity = null;
         this.cachedFor = Blocks.AIR.defaultBlockState();
+        // A sync packet lands here and not in onLoad, so this is the only place a client learns that
+        // the carrier's wrapped block changed. See refreshModel() for why both the model data cache
+        // and the section have to be invalidated for the texture to follow.
+        this.refreshModel();
     }
 
     @Override
@@ -233,6 +262,16 @@ public class RotatedBlockEntity extends BlockEntity implements Nameable {
         }
         if (!this.innerName.isEmpty()) {
             tag.putString("InnerName", this.innerName);
+        }
+        // Signs need their text on the client. A sign is one of the INVISIBLE-shape blocks whose
+        // whole appearance - wood model AND written text - is drawn by the block entity renderer,
+        // and that renderer reads the text out of the detached sign block entity this carrier keeps.
+        // Without the NBT in the sync packet the client rebuilt a blank sign: the model turned with
+        // the carrier but every line the player had written was gone. Signs only - the payload stays
+        // tiny, and containers reach the client through their own menus instead.
+        if (this.inner.getBlock() instanceof net.minecraft.world.level.block.SignBlock
+                && this.innerEntity != null) {
+            tag.put("InnerEntity", this.innerEntity.copy());
         }
         return tag;
     }

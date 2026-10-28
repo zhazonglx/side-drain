@@ -9,6 +9,7 @@ import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.blockentity.BlockEntityRenderers;
 import net.minecraft.world.level.block.RedStoneWireBlock;
 import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.client.event.ModelEvent;
 import net.minecraftforge.client.event.RegisterColorHandlersEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -16,10 +17,32 @@ import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
 
 @Mod.EventBusSubscriber(modid = com.sidedrain.SideDrain.MODID, bus = Mod.EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)
 public final class ClientSetup {
+    /**
+     * Puts the mod's keys into Options -> Controls.
+     *
+     * <p>These are <b>additional</b> keys, not replacements: the sneak + click gestures keep
+     * working exactly as before, and these bindings let the same actions be performed without
+     * holding sneak.
+     *
+     * <p>This is a mod-bus event, so it must be handled on this class (which is registered on
+     * {@code Bus.MOD}); subscribing from a plain game-bus class would silently never fire and the
+     * bindings would be missing from the controls screen with no error.
+     */
+    @SubscribeEvent
+    public static void onRegisterKeyMappings(
+            net.minecraftforge.client.event.RegisterKeyMappingsEvent event) {
+        event.register(ModKeys.ROTATE);
+        event.register(ModKeys.CARRY);
+    }
+
     @SubscribeEvent
     public static void onClientSetup(FMLClientSetupEvent event) {
         event.enqueueWork(() -> {
             MenuScreens.register(ModMenus.SIDE_DRAIN.get(), SideDrainScreen::new);
+            // The persistent crafting menu reuses vanilla's screen layout wholesale: CraftingScreen
+            // accepts any CraftingMenu subclass, and this menu is one.
+            MenuScreens.register(ModMenus.PERSISTENT_CRAFTING.get(),
+                    net.minecraft.client.gui.screens.inventory.CraftingScreen::new);
             BlockEntityRenderers.register(ModBlockEntities.ROTATED_BLOCK.get(), RotatedBlockRenderer::new);
 
             // The redstone panel re-uses vanilla's own dust textures, and every one of them is
@@ -31,6 +54,7 @@ public final class ClientSetup {
             // REDSTONE_WIRE as cutout for exactly this reason; the panel has to match it or it
             // stops looking like redstone at all.
             ItemBlockRenderTypes.setRenderLayer(ModBlocks.STANDING_REDSTONE.get(), RenderType.cutout());
+            ModKeys.describe();
         });
     }
 
@@ -47,6 +71,7 @@ public final class ClientSetup {
         event.registerReloadListener((barrier, manager, prepProfiler, reloadProfiler, background, game) ->
                 barrier.wait(null).thenRunAsync(() -> {
                     RotatedBlockRenderer.clearCaches();
+                    com.sidedrain.client.PlateAimModel.clearCaches();
                     com.sidedrain.util.ShapeRotator.clearCache();
                 }, game));
     }
@@ -57,6 +82,17 @@ public final class ClientSetup {
         event.register((state, level, pos, tintIndex) ->
                         RedStoneWireBlock.getColorForPower(state.getValue(com.sidedrain.block.StandingRedstoneBlock.POWER)),
                 ModBlocks.STANDING_REDSTONE.get());
+        // The rotated block has to resolve its tint from the block it wraps.
+        //
+        // A rotated block's quads keep the tintIndex of the wrapped block - grass overlay, leaves,
+        // redstone wire - but the tint is looked up from the state the mesher is drawing, which is
+        // the carrier. The carrier had no colour handler, so every tinted quad resolved to white:
+        // a rotated grass block turned grey-white, rotated leaves turned grey. Delegating to the
+        // wrapped block's own handler, at the carrier's own position, keeps biome tints and modded
+        // tints correct - the wrapped block's handler is asked, so a mod's own colours come through.
+        event.register((state, level, pos, tintIndex) ->
+                        com.sidedrain.client.RotatedBlockTint.color(state, level, pos, tintIndex),
+                ModBlocks.ROTATED_BLOCK.get());
     }
 
     /**
@@ -71,6 +107,28 @@ public final class ClientSetup {
     public static void onRegisterGeometryLoaders(
             net.minecraftforge.client.event.ModelEvent.RegisterGeometryLoaders event) {
         event.register("rotated", new com.sidedrain.client.RotatedBlockModel.Loader());
+        // The plate's dynamic aim model: it turns the flat slab by the wrench's tilt and spin, which
+        // the blockstate's 90-degree-only rotations cannot express.
+        event.register("plate_aim", new com.sidedrain.client.PlateAimModel.Loader());
+    }
+
+    /**
+     * Ensures the plate's flat source slabs are baked even though the blockstate no longer points at
+     * them.
+     *
+     * <p>{@code PlateAimModel} turns the flat slab's quads at mesh time, so it needs the three flat
+     * slabs baked as standalone models. Vanilla only bakes a model when something references it, and
+     * the blockstate used to be that reference - pointing every variant at the dynamic model instead
+     * would leave the slabs unbaked and the plate invisible. This registration is the reference.
+     */
+    @SubscribeEvent
+    public static void onRegisterAdditional(ModelEvent.RegisterAdditional event) {
+        event.register(new net.minecraft.resources.ResourceLocation(
+                "sidedrain", "block/side_drain_plate_side_t0"));
+        event.register(new net.minecraft.resources.ResourceLocation(
+                "sidedrain", "block/side_drain_plate_up_t0"));
+        event.register(new net.minecraft.resources.ResourceLocation(
+                "sidedrain", "block/side_drain_plate_down_t0"));
     }
 
     private ClientSetup() {

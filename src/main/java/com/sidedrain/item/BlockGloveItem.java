@@ -29,8 +29,11 @@ public class BlockGloveItem extends Item {
         super(properties);
     }
 
+    /**
+     * The carried payload tag of this glove stack, or {@code null} when it carries nothing.
+     */
     @Nullable
-    private static CompoundTag carriedTag(ItemStack stack) {
+    public static CompoundTag carriedTag(ItemStack stack) {
         CompoundTag tag = stack.getTag();
         if (tag == null || !tag.contains(ROOT, 10)) {
             return null;

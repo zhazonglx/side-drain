@@ -42,6 +42,20 @@ public final class ModNetwork {
                 .decoder(CarrySyncPacket::decode)
                 .consumerMainThread(CarrySyncPacket::handle)
                 .add();
+
+        // Edited text for a sign wrapped in a carrier: vanilla's own update packet looks the sign up
+        // by position and finds the carrier instead, so the edit never landed.
+        CHANNEL.messageBuilder(SignEditUpdatePacket.class, nextId++, NetworkDirection.PLAY_TO_SERVER)
+                .encoder(SignEditUpdatePacket::encode)
+                .decoder(SignEditUpdatePacket::decode)
+                .consumerMainThread(SignEditUpdatePacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(SignEditOpenPacket.class, nextId++, NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(SignEditOpenPacket::encode)
+                .decoder(SignEditOpenPacket::decode)
+                .consumerMainThread(SignEditOpenPacket::handle)
+                .add();
     }
 
     public static void sendToServer(Object message) {

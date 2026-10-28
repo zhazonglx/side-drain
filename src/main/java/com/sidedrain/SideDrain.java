@@ -34,6 +34,10 @@ public class SideDrain {
         ModNetwork.register();
         MinecraftForge.EVENT_BUS.register(CommonEvents.class);
         MinecraftForge.EVENT_BUS.register(Lifecycle.class);
+        // Crafting-table container persistence: open/close restore + spill on break. This is what
+        // turns a vanilla (or modded subclass) crafting table into a container the plates can clamp
+        // onto, and what keeps items left on the table from dropping when the screen closes.
+        MinecraftForge.EVENT_BUS.register(com.sidedrain.event.CraftingTableEvents.class);
     }
 
     /**

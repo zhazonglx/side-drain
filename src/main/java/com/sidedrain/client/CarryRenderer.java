@@ -209,6 +209,12 @@ public final class CarryRenderer {
         // and no unit conversion is needed: this space is already in blocks.
         CarryBlockRender.draw(state, carriedStack, poseStack, event.getMultiBufferSource(),
                 event.getPackedLight(), player.level(), true);
+        // The plates clamped onto the carried block travel with it, drawn in the same block-centred
+        // space so they sit exactly where they were standing. The glove is resolved the same way the
+        // display was, so the plates follow the hand on the same frame.
+        com.sidedrain.client.CarryPlateRender.drawCarriedPlates(
+                com.sidedrain.client.CarryHandler.gloveInHand(player), poseStack,
+                event.getMultiBufferSource(), event.getPackedLight(), player.level());
         poseStack.popPose();
     }
 
