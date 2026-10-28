@@ -29,6 +29,20 @@ public final class MultiBlockHelper {
     }
 
     /**
+     * True for the two-block plants: tall grass, large fern, tall flowers, tall seagrass.
+     *
+     * <p>These differ from a door in an important way. A door has a real orientation
+     * ({@code FACING} plus {@code OPEN}/{@code HINGE}), so both halves can be rebuilt in the new
+     * orientation and the pair stays a legal door. A double plant's only property is
+     * {@code HALF}, which says which block of the pair it is and is not a direction - there is no
+     * orientation to rotate at all. Such a plant therefore cannot be turned in place and has to be
+     * lifted into carriers, which is what {@link #isDoublePlant} lets the wrench distinguish.
+     */
+    public static boolean isDoublePlant(BlockState state) {
+        return state.getBlock() instanceof DoublePlantBlock;
+    }
+
+    /**
      * The position of the other half, or {@code null} when this block is a single block.
      *
      * <p>Each family records the pair differently: a bed stores which half it is and points at the

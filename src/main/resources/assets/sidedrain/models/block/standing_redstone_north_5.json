@@ -1,0 +1,151 @@
+﻿{
+  "ambientocclusion": false,
+  "textures": {
+    "particle": "minecraft:block/redstone_dust_dot",
+    "dot": "minecraft:block/redstone_dust_dot",
+    "line": "minecraft:block/redstone_dust_line0",
+    "overlay": "minecraft:block/redstone_dust_overlay"
+  },
+  "elements": [
+    {
+      "from": [
+        0,
+        0,
+        0.25
+      ],
+      "to": [
+        16,
+        16,
+        0.25
+      ],
+      "shade": false,
+      "faces": {
+        "north": {
+          "texture": "#dot",
+          "tintindex": 0
+        },
+        "south": {
+          "texture": "#dot",
+          "tintindex": 0
+        }
+      }
+    },
+    {
+      "from": [
+        0,
+        0,
+        0.25
+      ],
+      "to": [
+        16,
+        16,
+        0.25
+      ],
+      "shade": false,
+      "faces": {
+        "north": {
+          "texture": "#overlay"
+        },
+        "south": {
+          "texture": "#overlay"
+        }
+      }
+    },
+    {
+      "from": [
+        8,
+        4,
+        0.25
+      ],
+      "to": [
+        16,
+        12,
+        0.25
+      ],
+      "shade": false,
+      "faces": {
+        "north": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 90
+        },
+        "south": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 270
+        }
+      }
+    },
+    {
+      "from": [
+        8,
+        4,
+        0.25
+      ],
+      "to": [
+        16,
+        12,
+        0.25
+      ],
+      "shade": false,
+      "faces": {
+        "north": {
+          "texture": "#overlay",
+          "rotation": 90
+        },
+        "south": {
+          "texture": "#overlay",
+          "rotation": 270
+        }
+      }
+    },
+    {
+      "from": [
+        4,
+        8,
+        0.25
+      ],
+      "to": [
+        12,
+        16,
+        0.25
+      ],
+      "shade": false,
+      "faces": {
+        "north": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 180
+        },
+        "south": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 180
+        }
+      }
+    },
+    {
+      "from": [
+        4,
+        8,
+        0.25
+      ],
+      "to": [
+        12,
+        16,
+        0.25
+      ],
+      "shade": false,
+      "faces": {
+        "north": {
+          "texture": "#overlay",
+          "rotation": 180
+        },
+        "south": {
+          "texture": "#overlay",
+          "rotation": 180
+        }
+      }
+    }
+  ]
+}

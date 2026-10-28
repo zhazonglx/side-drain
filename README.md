@@ -83,7 +83,7 @@ Tested against the **Closing Song 1.6.5** modpack (298 mods) including Sophistic
 ## Installation
 
 1. Install Minecraft Forge 47.x for 1.20.1.
-2. Drop `sidedrain-1.0.0.jar` into your `mods` folder.
+2. Drop `sidedrain-1.0.1.jar` into your `mods` folder.
 3. Launch.
 
 Client and server both need the mod.
@@ -96,7 +96,7 @@ Client and server both need the mod.
 ./gradlew build
 ```
 
-The jar lands in `build/libs/sidedrain-1.0.0.jar`. Requires JDK 17.
+The jar lands in `build/libs/sidedrain-1.0.1.jar`. Requires JDK 17.
 
 ---
 

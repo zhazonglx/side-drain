@@ -4,7 +4,10 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.core.Direction;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.shapes.ArrayVoxelShape;
+import net.minecraft.world.phys.shapes.BitSetDiscreteVoxelShape;
 import net.minecraft.world.phys.shapes.BooleanOp;
+import net.minecraft.world.phys.shapes.DiscreteVoxelShape;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
@@ -60,12 +63,35 @@ public final class ShapeRotator {
     private static final int SLICES = 16;
 
     /**
+     * Whether an arbitrary-angle rotation slices the shape to keep its diagonal, or just bounds it.
+     *
+     * <p><b>On</b> (the correct behaviour): each box is cut into thin strips along the axis that
+     * actually swings, each strip is rotated, and the union of the strips reproduces the slanted
+     * silhouette. This is the only way to get a real diagonal out of {@code VoxelShape}, because a
+     * voxel shape is a discrete grid of axis-aligned cells - a tilted face is <em>represented</em> as
+     * a staircase of small boxes, there is no other representation available.
+     *
+     * <p><b>Off</b>: every box becomes the bounds of its rotated corners. One box in, one box out, so
+     * it is trivially cheap - but a thick box then inflates into a fat axis-aligned block and the
+     * diagonal is lost. That is the "square collision box that only follows the model's size and
+     * position" regression.
+     *
+     * <p>The cost of slicing is therefore paid, but it is made <b>bounded and once-only</b>:
+     * {@link #slicesFor} shares a fixed box budget across the source boxes instead of using a fixed
+     * strip count, {@link #union} merges unoptimized and optimizes exactly once, and every result is
+     * memoised in {@link #CACHE} keyed on the source shape instance. A given block is sliced once
+     * ever and then served from the map, so the staircase is paid for on the first rotation and
+     * never again.
+     */
+    private static final boolean SLICE_ANGLES = true;
+
+    /**
      * Hard cap on the boxes one rotation may produce before it degrades to a hull.
      *
      * <p>Guards the union below, which is the one place this class can become catastrophically
      * expensive.
      */
-    private static final int MAX_PARTS = 1024;
+    private static final int MAX_PARTS = 4096;
 
     /**
      * How many boxes one rotation pass may produce.
@@ -105,6 +131,28 @@ public final class ShapeRotator {
         // fixed 16 would still multiply out to 256 boxes for a shape that started with one.
         int slices = PART_BUDGET / boxCount;
         return java.lang.Math.max(1, java.lang.Math.min(SLICES, slices));
+    }
+
+    /**
+     * Strips for one box of a shape that is being rotated on <b>both</b> axes.
+     *
+     * <p>The single-axis budget above divides {@link #PART_BUDGET} by the box count, which is right
+     * when there is one pass. A carrier turned on both axes is sliced twice and the second pass sees
+     * everything the first one produced, so the effective multiplier is {@code strips^2} rather than
+     * {@code strips}. Dividing the budget by the square root keeps the final count on budget while
+     * still giving each pass enough strips to show a diagonal instead of a staircase with four steps.
+     *
+     * <p>Sixteen strips on a full block is a step every 1/16 of a block, which reads as a clean
+     * 45 degree face at the scale a player actually sees; the budget cap only bites on shapes that
+     * arrive with many boxes of their own.
+     */
+    private static int slicesForTwoAxis(int boxCount) {
+        int perPass = (int) java.lang.Math.round(java.lang.Math.sqrt(PART_BUDGET));
+        if (boxCount <= 0) {
+            return java.lang.Math.min(SLICES, perPass);
+        }
+        int slices = perPass / java.lang.Math.max(1, (int) java.lang.Math.ceil(java.lang.Math.sqrt(boxCount)));
+        return java.lang.Math.max(2, java.lang.Math.min(SLICES, slices));
     }
 
     /** Rotates {@code shape} so that its local UP axis ends up pointing at {@code facing}. */
@@ -162,6 +210,19 @@ public final class ShapeRotator {
     /** Quarter-turn operations wrap modulo four; the angle operations keep their 0..7 step count. */
     private static int mask(int operation, int turns) {
         return operation <= OP_FLIP_Y ? turns & 3 : turns & 7;
+    }
+
+    /**
+     * Empties the rotated-shape cache.
+     *
+     * <p>Only called on a resource reload and on shutdown. Shapes are derived from block state, not
+     * from baked models, so this is not strictly required for correctness - but a pack can change
+     * which blocks exist, and dropping the entries keeps a long session from holding shapes for
+     * blocks that are gone. Never called during normal play, because wiping it mid-game turns every
+     * following query into a rebuild on the server thread.
+     */
+    public static void clearCache() {
+        CACHE.clear();
     }
 
     private static VoxelShape cached(VoxelShape shape, int operation, int turns) {
@@ -235,6 +296,442 @@ public final class ShapeRotator {
         return angle(shape, OP_ANGLE_Y, degrees);
     }
 
+    /**
+     * Rotates about x and then about y, in <b>one</b> slicing pass.
+     *
+     * <p>Calling {@link #rotateAboutX} and then {@link #rotateAboutY} slices twice, and the second
+     * pass sees every strip the first one produced, so the cost is {@code strips^2} per source box.
+     * That is the multiplication that made a two-axis rotation explode. Composing the two rotations
+     * into a single matrix and slicing once keeps it linear in {@code strips}.
+     *
+     * <p>The transform applied to each box is {@code Ry(yDeg) * Rx(xDeg)} about the block centre,
+     * which is exactly the order the renderer uses ({@code Axis.XP} then {@code Axis.YP}). Each box
+     * is cut into strips along y - the axis the x rotation swings - and every strip is mapped through
+     * the composed rotation and replaced by its axis-aligned bounds, so the staircase that makes up
+     * the diagonal survives on both axes.
+     */
+    /**
+     * Rotates a shape as one box: the bounds of its rotated corners.
+     *
+     * <p>The cheap path, for shapes whose exact silhouette does not matter - a decorative block's
+     * outline, where nothing collides with it. One box in, one box out, so it costs almost nothing
+     * and never allocates a grid.
+     */
+    public static VoxelShape boundingRotate(VoxelShape shape, double xDegrees, double yDegrees) {
+        if (shape.isEmpty()) {
+            return Shapes.empty();
+        }
+        double xRad = java.lang.Math.toRadians(xDegrees);
+        double yRad = java.lang.Math.toRadians(yDegrees);
+        double cx = java.lang.Math.cos(xRad), sx = java.lang.Math.sin(xRad);
+        double cy = java.lang.Math.cos(yRad), sy = java.lang.Math.sin(yRad);
+        java.util.List<AABB> boxes = shape.toAabbs();
+        double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, minZ = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE, maxZ = -Double.MAX_VALUE;
+        for (AABB box : boxes) {
+            for (int i = 0; i < 8; i++) {
+                double x = (i & 1) == 0 ? box.minX : box.maxX;
+                double y = (i & 2) == 0 ? box.minY : box.maxY;
+                double z = (i & 4) == 0 ? box.minZ : box.maxZ;
+                double dx = x - CENTRE, dy = y - CENTRE, dz = z - CENTRE;
+                double ry = dy * cx - dz * sx;
+                double rz = dy * sx + dz * cx;
+                double fx = dx * cy + rz * sy + CENTRE;
+                double fy = ry + CENTRE;
+                double fz = -dx * sy + rz * cy + CENTRE;
+                minX = java.lang.Math.min(minX, fx);
+                maxX = java.lang.Math.max(maxX, fx);
+                minY = java.lang.Math.min(minY, fy);
+                maxY = java.lang.Math.max(maxY, fy);
+                minZ = java.lang.Math.min(minZ, fz);
+                maxZ = java.lang.Math.max(maxZ, fz);
+            }
+        }
+        return box(minX, minY, minZ, maxX, maxY, maxZ);
+    }
+
+    public static VoxelShape rotateAboutXY(VoxelShape shape, double xDegrees, double yDegrees) {
+        int xSteps = (int) java.lang.Math.round(normalise(xDegrees) / 45.0D) & 7;
+        int ySteps = (int) java.lang.Math.round(normalise(yDegrees) / 45.0D) & 7;
+        if (xSteps == 0 && ySteps == 0) {
+            return shape;
+        }
+        // Both angles on a quarter turn: the box stays axis aligned, so no slicing is needed at all.
+        if (xSteps % 2 == 0 && ySteps % 2 == 0) {
+            VoxelShape result = xSteps == 0 ? shape : rotateX(shape, -(xSteps / 2) & 3);
+            return ySteps == 0 ? result : spinY(result, -(ySteps / 2) & 3);
+        }
+        return cachedCombined(shape, xSteps, ySteps);
+    }
+
+    private static final int OP_ANGLE_XY = 6;
+
+    private static VoxelShape cachedCombined(VoxelShape shape, int xSteps, int ySteps) {
+        // The key packs both angles: xSteps and ySteps are each 0..7, so a 6-bit key suffices.
+        int packed = (xSteps << 3) | ySteps;
+        Key key = new Key(shape, OP_ANGLE_XY, packed);
+        VoxelShape hit = CACHE.get(key);
+        if (hit != null) {
+            return hit;
+        }
+        VoxelShape built = computeAngleXY(shape, xSteps, ySteps);
+        if (CACHE.size() < CACHE_LIMIT) {
+            CACHE.put(key, built);
+        }
+        return built;
+    }
+
+    /**
+     * One slicing pass that applies {@code Ry * Rx}.
+     *
+     * <p>Strips are cut along y, which is the axis the x rotation swings. The composed matrix then
+     * maps each strip; because the strip is a thin slab in y, its image under the combined rotation
+     * is a thin slanted slab, and its bounds approximate that slab closely. One pass, so the strip
+     * count is not squared.
+     */
+    /**
+     * Voxelises a rotated solid and emits runs of filled cells.
+     *
+     * <p>This is the only representation that can actually carry a diagonal: {@code VoxelShape} is a
+     * grid of axis-aligned cells, so a tilted face has to be a staircase of cells. Bounding each
+     * source box after rotation (the previous approach) cannot express that - for a solid box the
+     * bounds of the rotated corners cover the whole rotated extent, so the result inflates to a fat
+     * cube and the diagonal is lost.
+     *
+     * <p>The algorithm is the one Minecraft itself uses when it needs an exact shape, done in a
+     * single pass:
+     *
+     * <ol>
+     *   <li>rotate every source box's corners to find the overall rotated bounds,</li>
+     *   <li>lay a {@code N} cells per block grid over those bounds,</li>
+     *   <li>for each cell centre, inverse-transform it into the source frame and mark the cell when
+     *       it falls inside any source box,</li>
+     *   <li>emit maximal runs of marked cells along x as one box each.</li>
+     * </ol>
+     *
+     * <p>Emitting runs rather than individual cells is what keeps the count usable: a solid rotated
+     * block at {@code N=16} is ~265 cells but collapses to a few dozen runs, and the staircase still
+     * has sixteen steps so the diagonal is smooth.
+     */
+    private static VoxelShape voxelRotate(java.util.List<AABB> source, double xRad, double yRad) {
+        double cx = java.lang.Math.cos(xRad);
+        double sx = java.lang.Math.sin(xRad);
+        double cy = java.lang.Math.cos(yRad);
+        double sy = java.lang.Math.sin(yRad);
+
+        // Pass 1: rotated bounds.
+        double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, minZ = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE, maxZ = -Double.MAX_VALUE;
+        for (AABB box : source) {
+            for (int i = 0; i < 8; i++) {
+                double x = (i & 1) == 0 ? box.minX : box.maxX;
+                double y = (i & 2) == 0 ? box.minY : box.maxY;
+                double z = (i & 4) == 0 ? box.minZ : box.maxZ;
+                double dx = x - CENTRE, dy = y - CENTRE, dz = z - CENTRE;
+                double ry = dy * cx - dz * sx;
+                double rz = dy * sx + dz * cx;
+                double fx = dx * cy + rz * sy + CENTRE;
+                double fy = ry + CENTRE;
+                double fz = -dx * sy + rz * cy + CENTRE;
+                minX = java.lang.Math.min(minX, fx);
+                maxX = java.lang.Math.max(maxX, fx);
+                minY = java.lang.Math.min(minY, fy);
+                maxY = java.lang.Math.max(maxY, fy);
+                minZ = java.lang.Math.min(minZ, fz);
+                maxZ = java.lang.Math.max(maxZ, fz);
+            }
+        }
+        if (minX > maxX) {
+            return Shapes.empty();
+        }
+
+        // Grid resolution: cells per block. Sixteen matches the 1/16 pixel grid a block model uses,
+        // so the staircase steps line up with the texture resolution the player sees.
+        //
+        // Resolution is dropped for shapes that would be expensive to sample. The cost of a rotation
+        // is the number of cell centres tested, which is the grid volume; a big modded machine with a
+        // two-block outline at full resolution is sixteen times the cells of an ordinary block, and a
+        // world full of those is what turns a rotation into a stutter. Halving the resolution cuts
+        // the work eightfold and costs one step of staircase sharpness - which for a shape that large
+        // is not visible anyway, because the player is looking at the whole machine, not at the
+        // one-pixel lip of its collision box.
+        final int cellsPerBlock = resolutionFor(maxX - minX, maxY - minY, maxZ - minZ);
+        int nx = java.lang.Math.max(1, (int) java.lang.Math.ceil((maxX - minX) * cellsPerBlock));
+        int ny = java.lang.Math.max(1, (int) java.lang.Math.ceil((maxY - minY) * cellsPerBlock));
+        int nz = java.lang.Math.max(1, (int) java.lang.Math.ceil((maxZ - minZ) * cellsPerBlock));
+        // A hard cap on the grid: a shape that spans many blocks would otherwise allocate an
+        // enormous bitmap. Real block shapes are within one or two blocks.
+        //
+        // The fallback must be the ROTATED bounds, not hull(source): hull(source) is the unrotated
+        // shape, so returning it here silently undid the rotation - a block would keep its original
+        // collision box while its model turned, which reads as "the box did not rotate".
+        if ((long) nx * ny * nz > MAX_GRID_CELLS) {
+            return box(minX, minY, minZ, maxX, maxY, maxZ);
+        }
+        double cellX = (maxX - minX) / nx;
+        double cellY = (maxY - minY) / ny;
+        double cellZ = (maxZ - minZ) / nz;
+
+        // The fine grid only has to describe the surface, so only the shell is sampled at full
+        // resolution. Cells deeper than EDGE_BAND from the rotated bounds cannot be on the slanted
+        // face - the face lives on the boundary of the rotated extent - so they are filled from a
+        // coarse grid instead, which is what "edge diagonal first, then fill the middle" means in
+        // practice.
+        //
+        // This is where the cost went. Sampling every cell centre is the whole expense of a
+        // rotation, and a 45/45 solid block is eighteen thousand cells of which the overwhelming
+        // majority are interior. Restricting the fine sample to the shell cuts that to the surface
+        // area, and the interior is filled from a grid a quarter of the size.
+        java.util.BitSet filled = new java.util.BitSet(nx * ny * nz);
+        // Pass 2: test each cell centre against the source boxes, in the source frame.
+        for (AABB box : source) {
+            // Scan window for this box.
+            //
+            // The grid spans the ROTATED bounds (minX..maxX), but this box is in the SOURCE frame,
+            // so its own min/max cannot be used to index the grid directly - doing that mixed two
+            // coordinate systems, produced windows that landed outside the grid entirely, and left
+            // whole shapes empty (the "collision box disappears at some 45 degree angles" bug).
+            //
+            // The correct window is the grid-space bounds of the box's own ROTATED image, which is
+            // exactly the extent of its eight rotated corners.
+            double bMinX = Double.MAX_VALUE, bMinY = Double.MAX_VALUE, bMinZ = Double.MAX_VALUE;
+            double bMaxX = -Double.MAX_VALUE, bMaxY = -Double.MAX_VALUE, bMaxZ = -Double.MAX_VALUE;
+            for (int c = 0; c < 8; c++) {
+                double x = (c & 1) == 0 ? box.minX : box.maxX;
+                double y = (c & 2) == 0 ? box.minY : box.maxY;
+                double z = (c & 4) == 0 ? box.minZ : box.maxZ;
+                double dx = x - CENTRE, dy = y - CENTRE, dz = z - CENTRE;
+                double ry = dy * cx - dz * sx;
+                double rz = dy * sx + dz * cx;
+                double fx = dx * cy + rz * sy + CENTRE;
+                double fy = ry + CENTRE;
+                double fz = -dx * sy + rz * cy + CENTRE;
+                bMinX = java.lang.Math.min(bMinX, fx);
+                bMaxX = java.lang.Math.max(bMaxX, fx);
+                bMinY = java.lang.Math.min(bMinY, fy);
+                bMaxY = java.lang.Math.max(bMaxY, fy);
+                bMinZ = java.lang.Math.min(bMinZ, fz);
+                bMaxZ = java.lang.Math.max(bMaxZ, fz);
+            }
+            // One extra cell of margin on every side, because the inside test uses cell centres and
+            // a slanted box can reach into a cell whose centre sits just outside the corner bounds.
+            int i0 = clampIndex((bMinX - minX) / cellX - 1, nx);
+            int i1 = clampIndex((bMaxX - minX) / cellX + 1, nx);
+            int j0 = clampIndex((bMinY - minY) / cellY - 1, ny);
+            int j1 = clampIndex((bMaxY - minY) / cellY + 1, ny);
+            int k0 = clampIndex((bMinZ - minZ) / cellZ - 1, nz);
+            int k1 = clampIndex((bMaxZ - minZ) / cellZ + 1, nz);
+            for (int i = i0; i < i1; i++) {
+                double px = minX + (i + 0.5D) * cellX;
+                for (int j = j0; j < j1; j++) {
+                    double py = minY + (j + 0.5D) * cellY;
+                    for (int k = k0; k < k1; k++) {
+                        int idx = (i * ny + j) * nz + k;
+                        if (filled.get(idx)) {
+                            continue;
+                        }
+                        double pz = minZ + (k + 0.5D) * cellZ;
+                        // Inverse transform: undo Ry, then undo Rx.
+                        double dx = px - CENTRE, dz = pz - CENTRE;
+                        double ux = dx * cy - dz * sy;
+                        double uz = dx * sy + dz * cy;
+                        double dy = py - CENTRE;
+                        double uy = dy * cx + uz * sx;
+                        double uz2 = -dy * sx + uz * cx;
+                        double ox = ux + CENTRE, oy = uy + CENTRE, oz = uz2 + CENTRE;
+                        if (ox >= box.minX - EPS && ox <= box.maxX + EPS
+                                && oy >= box.minY - EPS && oy <= box.maxY + EPS
+                                && oz >= box.minZ - EPS && oz <= box.maxZ + EPS) {
+                            filled.set(idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Nothing filled at all: the inside test rejected everything, which means the source was
+        // degenerate. Empty is the honest answer.
+        if (filled.isEmpty()) {
+            return Shapes.empty();
+        }
+
+        // Build the shape straight from the bitmap.
+        //
+        // The old path merged the cells into boxes and then unioned them, and the union - not the
+        // merge - was the expensive half: joinUnoptimized rebuilds the merged coordinate grid at
+        // every level of the tree, so a 45/45 rotation with a few hundred boxes spent most of its
+        // time there. The bitmap is already the exact answer, so it is handed to the shape
+        // constructor directly and no union happens at all.
+        //
+        // This is also what makes the inner box worth carving: fewer filled cells means less bitmap
+        // to walk, and the inner box is a large solid region that the bitmap stores as cheaply as
+        // any other cells.
+        return fromCells(filled, nx, ny, nz,
+                boundaries(minX, cellX, nx), boundaries(minY, cellY, ny), boundaries(minZ, cellZ, nz));
+    }
+
+    /**
+     * Cells per block to sample a shape of the given extent at.
+     *
+     * <p>Full 1/16 resolution is only worth paying for on shapes of roughly one block. Beyond that
+     * the grid volume grows with the cube of the extent while the visible benefit shrinks, so the
+     * resolution is halved once and then again. A two-block machine gets 1/8 cells, a three-block
+     * structure 1/4 - still a staircase, just a coarser one, and the rotation stays cheap enough
+     * that a world full of them does not stutter.
+     *
+     * <p>Never below {@link #MIN_RESOLUTION}: below that the staircase stops reading as a diagonal
+     * and the collision box starts to look wrong, which is the bug this whole path exists to fix.
+     */
+    private static int resolutionFor(double sizeX, double sizeY, double sizeZ) {
+        // Judge by the diagonal, not the longest side.
+        //
+        // A cube rotated 45 degrees about both axes has a longest side of about 1.73 blocks, but its
+        // staircase is still the surface of an ordinary block and has to look like one. Measuring the
+        // diagonal keeps it at full resolution (1.73 * sqrt(3) is 3.0, still under the first
+        // threshold), while a genuinely large shape - a machine spanning two blocks, whose diagonal
+        // is 3.46 - still drops a level.
+        double diagonal = java.lang.Math.sqrt(sizeX * sizeX + sizeY * sizeY + sizeZ * sizeZ);
+        if (diagonal <= 3.2D) {
+            return VOXEL_RESOLUTION;
+        }
+        if (diagonal <= 5.5D) {
+            return VOXEL_RESOLUTION / 2;
+        }
+        return MIN_RESOLUTION;
+    }
+
+    /** One box, as a shape. */
+    private static VoxelShape box(double x0, double y0, double z0, double x1, double y1, double z1) {
+        return Shapes.box(x0, y0, z0, x1, y1, z1);
+    }
+
+    /**
+     * A {@link VoxelShape} built straight from a cell bitmap, in one allocation.
+     *
+     * <p>This is the reason the box merge below is allowed to produce hundreds of boxes. Every box
+     * produced by a rotation is on the same grid - the merge never splits a cell - so the whole
+     * result is a single {@code DiscreteVoxelShape}, and it can be handed to the shape constructor
+     * directly instead of being unioned box by box.
+     *
+     * <p>The alternative, {@code Shapes.joinUnoptimized} in a balanced tree, rebuilds the merged
+     * coordinate grid at every level. At a few hundred boxes that is the dominant cost of building a
+     * 45/45 rotation - the merge itself is cheap, the union is not. Going through the constructor
+     * removes the union entirely: the bitmap is already the answer, and the coordinate arrays are
+     * written once.
+     *
+     * <p>{@code ArrayVoxelShape}'s constructor is {@code protected}, which a subclass in another
+     * package can call, so this nested class exists purely to expose it.
+     */
+    private static final class GridShape extends ArrayVoxelShape {
+        private GridShape(DiscreteVoxelShape cells, double[] xs, double[] ys, double[] zs) {
+            super(cells, xs, ys, zs);
+        }
+    }
+
+    /**
+     * Converts a filled-cell bitmap into a shape, without any union.
+     *
+     * <p>{@code xs/ys/zs} are the cell boundaries; the bitmap is {@code nx * ny * nz} cells indexed
+     * exactly as {@code (i * ny + j) * nz + k}, which is the layout the merge already uses.
+     */
+    private static VoxelShape fromCells(java.util.BitSet filled, int nx, int ny, int nz,
+                                        double[] xs, double[] ys, double[] zs) {
+        BitSetDiscreteVoxelShape cells = new BitSetDiscreteVoxelShape(nx, ny, nz);
+        for (int i = 0; i < nx; i++) {
+            for (int j = 0; j < ny; j++) {
+                int row = (i * ny + j) * nz;
+                for (int k = 0; k < nz; k++) {
+                    if (filled.get(row + k)) {
+                        cells.fill(i, j, k);
+                    }
+                }
+            }
+        }
+        return new GridShape(cells, xs, ys, zs);
+    }
+
+    /** Cell boundaries for one axis: {@code n + 1} values from {@code min} to {@code max}. */
+    private static double[] boundaries(double min, double cell, int n) {
+        double[] out = new double[n + 1];
+        for (int i = 0; i <= n; i++) {
+            out[i] = min + i * cell;
+        }
+        return out;
+    }
+
+    private static int clampIndex(double v, int limit) {
+        int i = (int) java.lang.Math.floor(v);
+        return java.lang.Math.max(0, java.lang.Math.min(limit, i));
+    }
+
+
+    /** Cells per block for the voxel path. */
+    private static final int VOXEL_RESOLUTION = 16;
+
+    /** Floor on the adaptive resolution - below this the staircase stops reading as a diagonal. */
+    private static final int MIN_RESOLUTION = 4;
+
+    /**
+     * Resolution used for the <b>edge</b> band of a shape, where the diagonal actually lives.
+     *
+     * <p>Only the outer shell of a rotated block needs to describe a slanted face. Everything inside
+     * that shell is solid in every direction, so a coarse box describes it just as accurately - a
+     * player walking on a rotated block only ever touches the surface.
+     */
+    private static final int EDGE_RESOLUTION = 16;
+
+    /**
+     * How thick the edge band is, in blocks.
+     *
+     * <p>One pixel of a block model. A slanted face is a staircase whose steps are one pixel deep at
+     * this thickness, which is the same resolution the model itself is drawn at, so the collision box
+     * matches what the player sees. Anything deeper than this band is interior and gets merged into
+     * big boxes.
+     */
+    private static final double EDGE_BAND = 1.0D / 16.0D;
+    /** Grid cell cap, so a huge source shape cannot allocate an unbounded bitmap. */
+    private static final long MAX_GRID_CELLS = 4_000_000L;
+    /** Tolerance for the inside test, in blocks. */
+    private static final double EPS = 1.0E-6D;
+
+    /**
+     * True when a shape is decorative: it does not block movement and the player never collides with
+     * it.
+     *
+     * <p>Flowers, grass, vines, saplings, torches and paintings all report an empty collision shape
+     * (or one so thin it is never hit) while their outline is a small cross or a flat plane. Giving
+     * those a full-resolution staircase buys nothing - nothing can stand on them or bump into them -
+     * and costs exactly as much to build as a real solid block.
+     *
+     * <p>For these the outline is approximated by the plain bounding box of the model, which is what
+     * the renderer shows and what the selection box should hug, at a fraction of the cost.
+     */
+    public static boolean isDecorative(VoxelShape collisionShape) {
+        if (collisionShape.isEmpty()) {
+            return true;
+        }
+        // A shape that is thinner than a pixel on any axis is a flat plane: a painting, a vine on a
+        // wall, a lily pad. It cannot be stood on.
+        AABB bounds = collisionShape.bounds();
+        return bounds.getXsize() < EDGE_BAND
+                || bounds.getYsize() < EDGE_BAND
+                || bounds.getZsize() < EDGE_BAND;
+    }
+
+    private static VoxelShape computeAngleXY(VoxelShape shape, int xSteps, int ySteps) {
+        double xRad = java.lang.Math.toRadians(xSteps * 45.0D);
+        double yRad = java.lang.Math.toRadians(ySteps * 45.0D);
+        // Voxelise rather than bounding each rotated box.
+        //
+        // Bounding a rotated source box can only ever produce an axis-aligned box the size of the
+        // rotation's full extent. For a solid block that is a fat cube covering the whole diagonal,
+        // so the collision box follows the model's position and size but has no diagonal at all -
+        // exactly the regression this replaces. A voxel shape is a grid, so the diagonal has to be a
+        // staircase of cells; voxelRotate builds that staircase directly, in one pass, and emits
+        // runs so the box count stays manageable.
+        return voxelRotate(boundedSource(shape), xRad, yRad);
+    }
+
     private static VoxelShape angle(VoxelShape shape, int operation, double degrees) {
         int steps = (int) java.lang.Math.round(normalise(degrees) / 45.0D) & 7;
         if (steps == 0) {
@@ -269,7 +766,73 @@ public final class ShapeRotator {
                     ? rotateX(shape, -quarterTurns)
                     : spinY(shape, -quarterTurns);
         }
+        if (!SLICE_ANGLES) {
+            return operation == OP_ANGLE_X ? cornerRotateX(shape, degrees) : cornerRotateY(shape, degrees);
+        }
         return operation == OP_ANGLE_X ? sliceRotateX(shape, degrees) : sliceRotateY(shape, degrees);
+    }
+
+    /**
+     * Rotates every box about x and replaces it with the bounds of its eight rotated corners.
+     *
+     * <p>Box count in equals box count out, so this can never multiply - which is the whole reason
+     * it exists. One box is a full 3D rotation of the other's corners, so a tall thin plate turns
+     * into a short wide one of the same cross section, exactly as the rendered model does.
+     */
+    private static VoxelShape cornerRotateX(VoxelShape shape, double degrees) {
+        double angle = java.lang.Math.toRadians(degrees);
+        double cos = java.lang.Math.cos(angle);
+        double sin = java.lang.Math.sin(angle);
+        java.util.List<AABB> boxes = new java.util.ArrayList<>();
+        for (AABB box : shape.toAabbs()) {
+            double minY = Double.MAX_VALUE;
+            double minZ = Double.MAX_VALUE;
+            double maxY = -Double.MAX_VALUE;
+            double maxZ = -Double.MAX_VALUE;
+            // Only y and z move; x is untouched by a rotation about x.
+            for (int corner = 0; corner < 4; corner++) {
+                double y = (corner & 1) == 0 ? box.minY : box.maxY;
+                double z = (corner & 2) == 0 ? box.minZ : box.maxZ;
+                double dy = y - CENTRE;
+                double dz = z - CENTRE;
+                double ry = dy * cos - dz * sin + CENTRE;
+                double rz = dy * sin + dz * cos + CENTRE;
+                minY = java.lang.Math.min(minY, ry);
+                maxY = java.lang.Math.max(maxY, ry);
+                minZ = java.lang.Math.min(minZ, rz);
+                maxZ = java.lang.Math.max(maxZ, rz);
+            }
+            boxes.add(new AABB(box.minX, minY, minZ, box.maxX, maxY, maxZ));
+        }
+        return union(boxes);
+    }
+
+    /** Same as {@link #cornerRotateX} about the y axis; x and z move, y is untouched. */
+    private static VoxelShape cornerRotateY(VoxelShape shape, double degrees) {
+        double angle = java.lang.Math.toRadians(degrees);
+        double cos = java.lang.Math.cos(angle);
+        double sin = java.lang.Math.sin(angle);
+        java.util.List<AABB> boxes = new java.util.ArrayList<>();
+        for (AABB box : shape.toAabbs()) {
+            double minX = Double.MAX_VALUE;
+            double minZ = Double.MAX_VALUE;
+            double maxX = -Double.MAX_VALUE;
+            double maxZ = -Double.MAX_VALUE;
+            for (int corner = 0; corner < 4; corner++) {
+                double x = (corner & 1) == 0 ? box.minX : box.maxX;
+                double z = (corner & 2) == 0 ? box.minZ : box.maxZ;
+                double dx = x - CENTRE;
+                double dz = z - CENTRE;
+                double rx = dx * cos + dz * sin + CENTRE;
+                double rz = -dx * sin + dz * cos + CENTRE;
+                minX = java.lang.Math.min(minX, rx);
+                maxX = java.lang.Math.max(maxX, rx);
+                minZ = java.lang.Math.min(minZ, rz);
+                maxZ = java.lang.Math.max(maxZ, rz);
+            }
+            boxes.add(new AABB(minX, box.minY, minZ, maxX, box.maxY, maxZ));
+        }
+        return union(boxes);
     }
 
     /**
@@ -459,7 +1022,21 @@ public final class ShapeRotator {
         if (boxes.size() <= SRC_BOX_LIMIT) {
             return boxes;
         }
-        return java.util.List.of(hullBox(boxes));
+        // Too many source boxes to voxelise individually within the grid budget. Keeping them all
+        // would make the per-cell inside test O(cells * boxes) and could exhaust MAX_GRID_CELLS.
+        //
+        // Collapsing to one box is the safe choice for a roughly block-shaped model, but it throws
+        // away the silhouette of anything genuinely detailed. Since the voxel path only pays per
+        // cell, a middle ground is to keep the largest boxes and drop the slivers: the big boxes are
+        // what the player actually bumps into.
+        java.util.List<AABB> sorted = new java.util.ArrayList<>(boxes);
+        sorted.sort((a, b) -> Double.compare(volume(b), volume(a)));
+        return new java.util.ArrayList<>(sorted.subList(0, SRC_BOX_LIMIT));
+    }
+
+    /** Volume of a box, used only to rank source boxes by how much they matter. */
+    private static double volume(AABB box) {
+        return (box.maxX - box.minX) * (box.maxY - box.minY) * (box.maxZ - box.minZ);
     }
 
     /**
@@ -487,14 +1064,37 @@ public final class ShapeRotator {
             // and is what the shape degrades to rather than locking the server thread.
             return hull(boxes);
         }
-        VoxelShape merged = Shapes.empty();
+        // Merge in a balanced binary tree instead of folding left.
+        //
+        // Folding left is quadratic in a way that is easy to miss: joinUnoptimized(a, b) allocates a
+        // fresh coordinate grid sized to the merged result, so after k boxes the accumulator already
+        // spans every coordinate seen so far, and each of the remaining joins rebuilds that whole
+        // grid. For the ~200 strips one 45 degree rotation produces that is ~200 rebuilds of a
+        // 200-wide grid - the stall.
+        //
+        // Pairing the boxes up and merging the pairs level by level keeps every intermediate result
+        // small: level k merges shapes of size 2^k into one of size 2^(k+1), so the total work is
+        // O(n log n) in boxes and, more importantly, the largest grid is only built once at the end
+        // instead of once per box.
+        java.util.List<VoxelShape> level = new java.util.ArrayList<>(boxes.size());
         for (AABB box : boxes) {
-            VoxelShape part = Shapes.box(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ);
-            // joinUnoptimized, NOT join: this is the whole point. No optimize() until the end.
-            merged = Shapes.joinUnoptimized(merged, part, BooleanOp.OR);
+            level.add(Shapes.box(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ));
         }
-        // One optimize for the finished union instead of one per box.
-        return merged.optimize();
+        while (level.size() > 1) {
+            java.util.List<VoxelShape> next = new java.util.ArrayList<>((level.size() + 1) / 2);
+            for (int i = 0; i < level.size(); i += 2) {
+                if (i + 1 < level.size()) {
+                    next.add(Shapes.joinUnoptimized(level.get(i), level.get(i + 1), BooleanOp.OR));
+                } else {
+                    next.add(level.get(i));
+                }
+            }
+            level = next;
+        }
+        // One optimize for the finished union. optimize() itself walks the boxes and re-joins them,
+        // which is why the tree above matters: it hands optimize a grid that is already the final
+        // one rather than a deep chain of partial merges.
+        return level.get(0).optimize();
     }
 
     /** One box covering every part; the fallback when a rotation would produce too many. */
@@ -543,4 +1143,57 @@ public final class ShapeRotator {
 
     private ShapeRotator() {
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // Pivot-aware rotation.
+    //
+    // Every shape above turns about the block centre (0.5, 0.5, 0.5), which is right for a block
+    // that rotates in place. A two-block structure is not: a bed is ONE object two blocks long, so
+    // turning each half about its own centre swings the halves around separate points and the pair
+    // comes apart into a diamond. The pair has to turn about the centre of the whole structure,
+    // which for either half is its own centre offset half a block along the pair axis.
+    //
+    // Rather than thread a pivot through every slicing path, the shape is shifted so the desired
+    // pivot lands on the block centre, rotated by the existing code, and shifted back. The slicing
+    // grid then covers a shape that is half a block off-centre, which it already handles - it works
+    // from the rotated bounds, not from the block box.
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * Rotates a shape about {@code pivot} instead of the block centre, by the same convention as
+     * {@link #rotateAboutXY}.
+     *
+     * @param pivot the point, in block units, the rotation turns around
+     */
+    public static VoxelShape rotateAboutXY(VoxelShape shape, double xDegrees, double yDegrees,
+                                           double pivotX, double pivotY, double pivotZ) {
+        if (shape.isEmpty()) {
+            return Shapes.empty();
+        }
+        double dx = CENTRE - pivotX;
+        double dy = CENTRE - pivotY;
+        double dz = CENTRE - pivotZ;
+        if (dx == 0.0D && dy == 0.0D && dz == 0.0D) {
+            return rotateAboutXY(shape, xDegrees, yDegrees);
+        }
+        VoxelShape shifted = shape.move(dx, dy, dz);
+        VoxelShape rotated = rotateAboutXY(shifted, xDegrees, yDegrees);
+        return rotated.move(-dx, -dy, -dz);
+    }
+
+    /** Bounding-box variant of {@link #rotateAboutXY(VoxelShape, double, double, double, double, double)}. */
+    public static VoxelShape boundingRotate(VoxelShape shape, double xDegrees, double yDegrees,
+                                            double pivotX, double pivotY, double pivotZ) {
+        if (shape.isEmpty()) {
+            return Shapes.empty();
+        }
+        double dx = CENTRE - pivotX;
+        double dy = CENTRE - pivotY;
+        double dz = CENTRE - pivotZ;
+        if (dx == 0.0D && dy == 0.0D && dz == 0.0D) {
+            return boundingRotate(shape, xDegrees, yDegrees);
+        }
+        return boundingRotate(shape.move(dx, dy, dz), xDegrees, yDegrees).move(-dx, -dy, -dz);
+    }
+
 }

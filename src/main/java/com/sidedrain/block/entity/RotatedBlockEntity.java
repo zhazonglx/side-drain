@@ -68,7 +68,30 @@ public class RotatedBlockEntity extends BlockEntity implements Nameable {
             this.cachedFor = Blocks.AIR.defaultBlockState();
         }
         this.inner = state;
+        // The wrapped state is what the model rotates, so the renderer has to be told when it changes
+        // or the mesher keeps drawing the previous block's geometry.
+        this.requestModelDataUpdate();
         this.setChanged();
+    }
+
+    /**
+     * Hands the wrapped state to the block model.
+     *
+     * <p>{@code RotatedBlock} reports {@code RenderShape.MODEL}, so the chunk mesher asks this block
+     * entity's model for its quads. The quads it must return are the <b>wrapped</b> block's, turned by
+     * this carrier's yaw and pitch - information that only exists here, not in the block state the
+     * mesher is holding. Putting it in the model data is what lets the model answer, and therefore
+     * what lets the mesher build the block through the ordinary terrain path with correct lighting,
+     * ambient occlusion and shader phase.
+     */
+    @Override
+    public net.minecraftforge.client.model.data.ModelData getModelData() {
+        if (this.inner.isAir()) {
+            return net.minecraftforge.client.model.data.ModelData.EMPTY;
+        }
+        return net.minecraftforge.client.model.data.ModelData.builder()
+                .with(com.sidedrain.client.RotatedBlockModel.INNER, this.inner)
+                .build();
     }
 
     public void setInnerEntity(@Nullable CompoundTag tag) {
@@ -255,4 +278,30 @@ public class RotatedBlockEntity extends BlockEntity implements Nameable {
         return this.innerName.isEmpty() ? null : Component.literal(this.innerName);
     }
 
+    /**
+     * A box that always contains the rotated geometry, so the carrier is never culled away from a
+     * frame it is still visible in.
+     *
+     * <p>{@code LevelRenderer} walks the block entity list and skips any entity whose
+     * {@code getRenderBoundingBox()} fails the frustum test. The default box is the bare block cell,
+     * which is correct for a block that stays inside its own cube - but a rotated block does not:
+     * tilt a full-block cube 45 degrees about one axis and its corners reach about 0.77 blocks from
+     * the centre, i.e. outside the cell, and a shape pivoting on a bed pair's shared centre reaches
+     * even further.
+     *
+     * <p>That made the carrier <b>flicker</b> under a shader pack rather than vanish: whether the
+     * cell box survived the frustum test depended on the exact camera position, so the carrier
+     * dropped out of the block entity pass on some frames and came back on the next. Since the
+     * model is only <i>queued</i> from that pass, a dropped frame meant the model was not drawn at
+     * all that frame - a visible flicker, not a culling artefact.
+     *
+     * <p>The box is inflated by a full block in every direction, which covers the worst case: a
+     * full cube pivoting about a centre one block away (the far half of a bed). It is deliberately
+     * generous - a slightly larger box than needed costs one frustum test, while a box that is too
+     * small costs a missing frame.
+     */
+    @Override
+    public net.minecraft.world.phys.AABB getRenderBoundingBox() {
+        return new net.minecraft.world.phys.AABB(this.worldPosition).inflate(1.0D);
+    }
 }

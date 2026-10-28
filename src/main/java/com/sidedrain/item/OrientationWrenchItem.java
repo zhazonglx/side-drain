@@ -84,6 +84,13 @@ public class OrientationWrenchItem extends Item {
 
         // A bed, door or tall flower is two positions; turning one half would break the pair.
         if (com.sidedrain.util.MultiBlockHelper.isDouble(state)) {
+            // A double plant - tall grass, a large fern, a tall flower - has no orientation property
+            // of its own, so there is nothing to rotate in place: the wrench has to lift BOTH halves
+            // into carriers and turn them together. Handling one half alone leaves the other behind
+            // as an orphaned vanilla half, which is why these used to do nothing at all.
+            if (com.sidedrain.util.MultiBlockHelper.isDoublePlant(state)) {
+                return rotateDoublePlant(level, pos, state, pitch);
+            }
             return rotatePair(level, pos, state, pitch);
         }
 
@@ -117,6 +124,100 @@ public class OrientationWrenchItem extends Item {
         }
 
         return wrap(level, pos, state, pitch);
+    }
+
+    /**
+     * Turns a two-block plant - tall grass, a large fern, a tall flower - by lifting both halves
+     * into carriers and stepping them together.
+     *
+     * <p>A double plant has no orientation property at all: its state is only {@code HALF}, which
+     * says which of the two blocks it is and is not a direction. That is why the wrench previously
+     * skipped it entirely - there was nothing to turn. The carrier gives it the missing axes: both
+     * halves become carriers holding the LOWER and UPPER states, and every click steps their shared
+     * yaw and pitch, so the plant leans, lies down or stands on its head as one rigid object.
+     *
+     * <p>The pair is always wrapped and unwrapped as a pair. If either half fails to convert, the
+     * other is put straight back, so a plant is never left half-carried - the same invariant the bed
+     * path keeps.
+     */
+    private static boolean rotateDoublePlant(Level level, BlockPos pos, BlockState state, boolean pitch) {
+        // Resolve to the lower half: it is the anchor, and it is the half whose block decides what
+        // the plant is. Whichever half was clicked, both are taken from the world.
+        BlockPos lowerPos = state.getValue(net.minecraft.world.level.block.DoublePlantBlock.HALF)
+                == net.minecraft.world.level.block.state.properties.DoubleBlockHalf.LOWER
+                ? pos : pos.below();
+        BlockState lowerState = level.getBlockState(lowerPos);
+        BlockPos upperPos = lowerPos.above();
+        BlockState upperState = level.getBlockState(upperPos);
+        if (!lowerState.is(state.getBlock()) || !upperState.is(state.getBlock())) {
+            // An unpaired half - a plant whose other block is already gone. Nothing sensible to do.
+            return false;
+        }
+        // Already carried on both halves: step them together, exactly like the bed path.
+        boolean lowerWrapped = lowerState.getBlock() instanceof RotatedBlock;
+        boolean upperWrapped = upperState.getBlock() instanceof RotatedBlock;
+        if (lowerWrapped != upperWrapped) {
+            return false;
+        }
+        if (lowerWrapped) {
+            return turnWrappedDoublePlant(level, lowerPos, upperPos, pitch);
+        }
+        return wrapDoublePlant(level, lowerPos, upperPos, lowerState, upperState, pitch);
+    }
+
+    /**
+     * Lifts both halves of a double plant into carriers, then steps them once.
+     *
+     * <p>The anchor is the <b>lower</b> half's cell, and the upper half always sits one block above
+     * it, because that is how a double plant is laid out in the world. Turning does not move either
+     * half to a different cell - only the model and the shape tilt - so the pair keeps its footprint
+     * and the plant stays one object.
+     */
+    private static boolean wrapDoublePlant(Level level, BlockPos lowerPos, BlockPos upperPos,
+                                           BlockState lowerState, BlockState upperState, boolean pitch) {
+        boolean okLower = wrapOne(level, lowerPos, lowerState);
+        boolean okUpper = okLower && wrapOne(level, upperPos, upperState);
+        if (!okUpper) {
+            if (okLower) {
+                restoreCarrier(level, lowerPos);
+            }
+            return false;
+        }
+        return turnWrappedDoublePlant(level, lowerPos, upperPos, pitch);
+    }
+
+    /**
+     * Steps both carrier halves of a wrapped double plant by one yaw or pitch step.
+     *
+     * <p>The two halves share one {@code YAW}/{@code PITCH} pair, so they stay parallel at every
+     * angle. Both going back to zero unwraps them as a pair, which is what keeps a plant whole.
+     */
+    private static boolean turnWrappedDoublePlant(Level level, BlockPos lowerPos, BlockPos upperPos,
+                                                  boolean pitch) {
+        BlockState lowerCarrier = level.getBlockState(lowerPos);
+        BlockState upperCarrier = level.getBlockState(upperPos);
+        if (!(lowerCarrier.getBlock() instanceof RotatedBlock)
+                || !(upperCarrier.getBlock() instanceof RotatedBlock)) {
+            return false;
+        }
+        int yaw = lowerCarrier.getValue(RotatedBlock.YAW);
+        int pitchValue = lowerCarrier.getValue(RotatedBlock.PITCH);
+        int nextYaw = pitch ? yaw : (yaw + 1) % 8;
+        int nextPitch = pitch ? (pitchValue + 1) % 8 : pitchValue;
+        if (nextYaw == 0 && nextPitch == 0) {
+            boolean okLower = unwrap(level, lowerPos);
+            boolean okUpper = unwrap(level, upperPos);
+            return okLower && okUpper;
+        }
+        level.setBlock(lowerPos,
+                lowerCarrier.setValue(RotatedBlock.YAW, nextYaw).setValue(RotatedBlock.PITCH, nextPitch),
+                Block.UPDATE_ALL);
+        level.setBlock(upperPos,
+                upperCarrier.setValue(RotatedBlock.YAW, nextYaw).setValue(RotatedBlock.PITCH, nextPitch),
+                Block.UPDATE_ALL);
+        level.playSound(null, lowerPos, lowerCarrier.getSoundType().getHitSound(),
+                SoundSource.BLOCKS, 0.9F, pitch ? 0.8F : 1.25F);
+        return true;
     }
 
     /**
@@ -204,11 +305,8 @@ public class OrientationWrenchItem extends Item {
      * four horizontal facings vanilla allows.
      */
     private static boolean rotateBed(Level level, BlockPos pos, BlockState state, boolean pitch) {
-        // Two entry states reach this method:
-        //   - a vanilla bed (clicked half may be head or foot), still a BedBlock;
-        //   - a wrapped bed, where each half is a RotatedBlock carrier holding a bed state.
-        // Both are resolved to the head position plus the pair's two bed states, so the rest of the
-        // method does not care which one it was given.
+        // Resolve the pair to its two vanilla bed states. A bed may be two plain BedBlocks or two
+        // carriers; both are unwrapped here so the rest of the method works on bed states only.
         boolean clickedWrapped = state.getBlock() instanceof RotatedBlock;
         BlockState clickedBed = clickedWrapped ? RotatedBlock.innerState(level, pos) : state;
         if (clickedBed == null || !(clickedBed.getBlock() instanceof net.minecraft.world.level.block.BedBlock)) {
@@ -238,22 +336,54 @@ public class OrientationWrenchItem extends Item {
         if (footBed == null || !(footBed.getBlock() instanceof net.minecraft.world.level.block.BedBlock)) {
             return false;
         }
-
-        // Both halves must already be carriers (a wrapped bed) or both still vanilla (a fresh bed).
         boolean headWrapped = headState.getBlock() instanceof RotatedBlock;
         boolean footWrapped = footState.getBlock() instanceof RotatedBlock;
         if (headWrapped != footWrapped) {
-            // A half-wrapped bed is a broken state; refuse rather than duplicate or lose a half.
             return false;
         }
 
-        if (!headWrapped) {
-            // Fresh vanilla bed: wrap both halves, keeping each half's own bed state.
-            return wrapBed(level, headPos, headBed, footPos, footBed, pitch);
+        if (pitch) {
+            // Shift + right click: tilt. The bed becomes two carriers and steps its pitch by 45
+            // degrees. A bed is ONE object two blocks long, so both halves turn about the middle of
+            // the whole bed rather than about their own centres - that is what keeps the two halves
+            // parallel and one block apart at every angle. Each carrier expresses that same world
+            // point in its own local frame, so the two halves move by one rigid transform.
+            if (!headWrapped) {
+                return wrapBed(level, headPos, headBed, footPos, footBed, true);
+            }
+            return turnWrappedBed(level, headPos, footPos, true);
         }
 
-        // Already a wrapped bed: step both carriers together so the pair stays attached.
-        return turnWrappedBed(level, headPos, footPos, pitch);
+        // Shift + left click: a plain quarter turn about the vertical axis, staying on the cell
+        // grid. The head stays put and the foot swings around it, so both halves remain ordinary
+        // blocks in ordinary cells with the vanilla model and collision box.
+        if (headWrapped) {
+            // Already tilted into carriers: step the yaw on both halves together, which keeps the
+            // pair rigid instead of re-gridding it.
+            return turnWrappedBed(level, headPos, footPos, false);
+        }
+        Direction facing = headBed.getValue(net.minecraft.world.level.block.BedBlock.FACING);
+        // FACING runs foot -> head, so the foot sits one block behind the head along it.
+        Direction newFacing = facing.getClockWise();
+        BlockPos newFootPos = headPos.relative(newFacing.getOpposite());
+        if (!newFootPos.equals(footPos)) {
+            BlockState target = level.getBlockState(newFootPos);
+            if (!target.canBeReplaced()) {
+                return false;
+            }
+            level.removeBlock(footPos, false);
+        }
+        level.setBlock(headPos, headBed
+                .setValue(net.minecraft.world.level.block.BedBlock.FACING, newFacing)
+                .setValue(net.minecraft.world.level.block.BedBlock.PART,
+                        net.minecraft.world.level.block.state.properties.BedPart.HEAD), Block.UPDATE_ALL);
+        level.setBlock(newFootPos, footBed
+                .setValue(net.minecraft.world.level.block.BedBlock.FACING, newFacing)
+                .setValue(net.minecraft.world.level.block.BedBlock.PART,
+                        net.minecraft.world.level.block.state.properties.BedPart.FOOT), Block.UPDATE_ALL);
+        level.playSound(null, headPos, headBed.getSoundType().getHitSound(),
+                SoundSource.BLOCKS, 0.9F, 1.25F);
+        return true;
     }
 
     /**
@@ -419,34 +549,48 @@ public class OrientationWrenchItem extends Item {
      * Dust and the standing panel are one family: every pitch step walks the panel through its six
      * facings, and the step that would come back around lays it flat as dust again.
      */
+    /**
+     * Cycles a redstone panel through its six facings, and back to flat dust.
+     *
+     * <p>The cycle is a single ring of seven steps - UP, DOWN, NORTH, SOUTH, EAST, WEST, and then
+     * flat dust - so every click moves it and six clicks always return it to ordinary dust. The
+     * previous version had two separate tables that disagreed: the pitch table never reached
+     * {@code EAST} on some paths and the yaw table mapped {@code EAST} onto {@code NORTH}, so a
+     * panel could be walked into a facing it could never leave, which is what made redstone
+     * "impossible to reset".
+     *
+     * <p>Both clicks walk the same ring. Pitch walks it forward, yaw walks it backward, which keeps
+     * the two clicks distinguishable without ever breaking the cycle.
+     */
     private static BlockState turnRedstone(BlockState state, boolean pitch) {
         if (state.getBlock() instanceof RedStoneWireBlock) {
-            // Flat dust always stands up first.
+            // Flat dust always stands up first, keeping its power so the wire does not blink.
             return ModBlocks.STANDING_REDSTONE.get().defaultBlockState()
                     .setValue(StandingRedstoneBlock.FACING, Direction.UP)
                     .setValue(StandingRedstoneBlock.POWER, state.getValue(RedStoneWireBlock.POWER));
         }
         Direction facing = state.getValue(StandingRedstoneBlock.FACING);
-        if (!pitch) {
-            // Yaw spins the panel around the vertical axis; a horizontal normal becomes vertical.
-            Direction next = switch (facing) {
-                case UP, DOWN -> facing;
-                case NORTH -> Direction.EAST;
-                case EAST -> Direction.SOUTH;
-                case SOUTH -> Direction.WEST;
-                case WEST -> Direction.NORTH;
-            };
-            return state.setValue(StandingRedstoneBlock.FACING, next);
+        // The ring, in the order a player meets it: floor, ceiling, then the four walls.
+        Direction[] ring = {
+                Direction.UP, Direction.DOWN,
+                Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST};
+        int index = 0;
+        for (int i = 0; i < ring.length; i++) {
+            if (ring[i] == facing) {
+                index = i;
+                break;
+            }
         }
-        Direction next = switch (facing) {
-            case UP -> Direction.NORTH;
-            case NORTH -> Direction.DOWN;
-            case DOWN -> Direction.SOUTH;
-            case SOUTH -> Direction.WEST;
-            case WEST -> Direction.UP;
-            case EAST -> Direction.NORTH;
-        };
-        return state.setValue(StandingRedstoneBlock.FACING, next);
+        int next = pitch ? index + 1 : index - 1;
+        if (next < 0) {
+            next = ring.length - 1;
+        }
+        if (next >= ring.length) {
+            // Walked off the end of the ring: back to flat dust, which is the reset the wrench needs.
+            return net.minecraft.world.level.block.Blocks.REDSTONE_WIRE.defaultBlockState()
+                    .setValue(RedStoneWireBlock.POWER, state.getValue(StandingRedstoneBlock.POWER));
+        }
+        return state.setValue(StandingRedstoneBlock.FACING, ring[next]);
     }
 
     // ------------------------------------------------------------------ carrier

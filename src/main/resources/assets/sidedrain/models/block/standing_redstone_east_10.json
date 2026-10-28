@@ -1,0 +1,147 @@
+﻿{
+  "ambientocclusion": false,
+  "textures": {
+    "particle": "minecraft:block/redstone_dust_dot",
+    "dot": "minecraft:block/redstone_dust_dot",
+    "line": "minecraft:block/redstone_dust_line0",
+    "overlay": "minecraft:block/redstone_dust_overlay"
+  },
+  "elements": [
+    {
+      "from": [
+        15.75,
+        0,
+        0
+      ],
+      "to": [
+        15.75,
+        16,
+        16
+      ],
+      "shade": false,
+      "faces": {
+        "east": {
+          "texture": "#dot",
+          "tintindex": 0
+        },
+        "west": {
+          "texture": "#dot",
+          "tintindex": 0
+        }
+      }
+    },
+    {
+      "from": [
+        15.75,
+        0,
+        0
+      ],
+      "to": [
+        15.75,
+        16,
+        16
+      ],
+      "shade": false,
+      "faces": {
+        "east": {
+          "texture": "#overlay"
+        },
+        "west": {
+          "texture": "#overlay"
+        }
+      }
+    },
+    {
+      "from": [
+        15.75,
+        4,
+        0
+      ],
+      "to": [
+        15.75,
+        12,
+        8
+      ],
+      "shade": false,
+      "faces": {
+        "east": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 270
+        },
+        "west": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 90
+        }
+      }
+    },
+    {
+      "from": [
+        15.75,
+        4,
+        0
+      ],
+      "to": [
+        15.75,
+        12,
+        8
+      ],
+      "shade": false,
+      "faces": {
+        "east": {
+          "texture": "#overlay",
+          "rotation": 270
+        },
+        "west": {
+          "texture": "#overlay",
+          "rotation": 90
+        }
+      }
+    },
+    {
+      "from": [
+        15.75,
+        0,
+        4
+      ],
+      "to": [
+        15.75,
+        8,
+        12
+      ],
+      "shade": false,
+      "faces": {
+        "east": {
+          "texture": "#line",
+          "tintindex": 0
+        },
+        "west": {
+          "texture": "#line",
+          "tintindex": 0
+        }
+      }
+    },
+    {
+      "from": [
+        15.75,
+        0,
+        4
+      ],
+      "to": [
+        15.75,
+        8,
+        12
+      ],
+      "shade": false,
+      "faces": {
+        "east": {
+          "texture": "#overlay"
+        },
+        "west": {
+          "texture": "#overlay"
+        }
+      }
+    }
+  ]
+}

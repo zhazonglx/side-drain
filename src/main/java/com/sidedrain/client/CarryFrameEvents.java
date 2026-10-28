@@ -19,7 +19,15 @@ import net.minecraftforge.fml.common.Mod;
 public final class CarryFrameEvents {
     @SubscribeEvent
     public static void onRenderLevelStage(RenderLevelStageEvent event) {
-        if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_ENTITIES) {
+        // AFTER_SKY, not AFTER_ENTITIES.
+        //
+        // The counter has to be fresh *before* entities are drawn, because that is when the carried
+        // block is rendered. Bumping it afterwards meant the value seen during entity rendering was
+        // still the previous frame's, and if the stage ever failed to fire the counter simply froze:
+        // every player id stayed in the "already drawn" set, so the block was drawn exactly once and
+        // then never again - which is what "third person shows nothing" looked like. AFTER_SKY is
+        // reached on every frame before ENTITIES, so the guard can never get stuck.
+        if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_SKY) {
             CarryRenderState.beginFrame();
         }
     }

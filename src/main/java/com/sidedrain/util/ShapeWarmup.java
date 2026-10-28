@@ -84,7 +84,13 @@ public final class ShapeWarmup {
         synchronized (ShapeWarmup.class) {
             if (pool == null) {
                 AtomicInteger counter = new AtomicInteger();
-                ThreadPoolExecutor created = new ThreadPoolExecutor(1, 2, 30L, TimeUnit.SECONDS,
+                // Sized to the machine: shape building is pure CPU on immutable geometry, so it
+                // parallelises cleanly. One thread left a long warm-up tail on the first placement
+                // of a large modded block; half the cores (minimum 2, maximum 4) finishes the same
+                // 63 combinations several times sooner without starving the game threads.
+                int threads = Math.max(2, Math.min(4,
+                        Runtime.getRuntime().availableProcessors() / 2));
+                ThreadPoolExecutor created = new ThreadPoolExecutor(threads, threads, 30L, TimeUnit.SECONDS,
                         new ArrayBlockingQueue<>(QUEUE_CAPACITY), runnable -> {
                             Thread thread = new Thread(runnable,
                                     "sidedrain-shape-warmup-" + counter.incrementAndGet());

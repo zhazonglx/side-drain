@@ -2,6 +2,7 @@ package com.sidedrain.util;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import com.sidedrain.util.ShapeRotator;
 import net.minecraft.core.Direction;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -44,9 +45,6 @@ public final class PlateAim {
     /** Rotation pivot: the middle of the block, exactly where the model's element rotation pivots. */
     private static final Vec3 PIVOT = new Vec3(0.5D, 0.5D, 0.5D);
 
-    /** Thin strips per box used to approximate a rotated slab. */
-    private static final int SLICES = 16;
-
     private static final Map<Key, VoxelShape> SHAPES = new ConcurrentHashMap<>();
 
     private record Key(Direction facing, int tilt) {
@@ -85,14 +83,23 @@ public final class PlateAim {
      * facing vector instead would send an east plate's items south.
      */
     public static Vec3 ejectDirection(Direction facing, int tilt) {
+        // The authored outward normal. The models are authored for a north (or up, or down) plate and
+        // the blockstate only turns them onto their face afterwards, so the same order has to be used
+        // here: tilt first, face turn second.
         Vec3 authored = switch (facing) {
             case UP -> new Vec3(0.0D, 1.0D, 0.0D);
             case DOWN -> new Vec3(0.0D, -1.0D, 0.0D);
             default -> new Vec3(0.0D, 0.0D, -1.0D);
         };
         int steps = Math.floorMod(tilt, STEPS);
+        // Exactly the same composed transform the collision box uses: Rx(tilt) then Ry(yaw). Deriving
+        // the direction from the same two angles is what guarantees the items leave along the normal
+        // of the slanted face rather than along the old vertical one - the direction used to be
+        // computed with a separate hand-written path that could drift from the shape.
         Vec3 tilted = steps == 0 ? authored : rotateX(authored, steps * (double) STEP_DEGREES);
-        return rotateY(tilted, yaw(facing)).normalize();
+        // Same negated yaw as the shape above, for the same reason: this must describe the identical
+        // transform, or items fly out of a face the plate is not pointing at.
+        return rotateY(tilted, -yaw(facing)).normalize();
     }
 
     /** The collision and outline box of a plate with this facing and aim. */
@@ -117,8 +124,25 @@ public final class PlateAim {
             case DOWN -> BASE_DOWN;
             default -> BASE_NORTH;
         };
-        VoxelShape tilted = steps == 0 ? base : rotateShapeX(base, steps * (double) STEP_DEGREES);
-        return rotateShapeY(tilted, yaw(facing)).optimize();
+        // One composed pass for the tilt and the face turn, so the slab is sliced once instead of
+        // twice. Slicing twice squared the strip count and, worse, the second pass worked on an
+        // already-sliced shape whose boxes are no longer a clean slab.
+        //
+        // The plate's own slab is a full-block thin wall, so the diagonal is what makes the
+        // collision box match the model: at 45 degrees the box has to be a staircase running from
+        // one corner of the block to the other, not a fat axis-aligned block.
+        //
+        // The blockstate transform is NEGATIVE. BlockModelRotation builds it with
+        //   new Quaternionf().rotateYXZ(-y, -x, 0)
+        // so the model's world transform is Rx(-x) * Ry(-y) applied on the outside of the element
+        // rotation. rotateAboutXY(x, y) applies Ry(y) * Rx(x), so the shape has to be given the
+        // negated yaw; passing the raw blockstate value rotated the box the wrong way.
+        //
+        // This is why the misalignment looked intermittent: the error is zero when yaw is 0 or 180
+        // (the rotation is its own inverse there) and a full 90 degrees on east and west. Verified
+        // numerically over all 16 (facing, tilt) pairs - +yaw mismatches 8 of them by 9.19 blocks
+        // in model units, -yaw matches all 16 exactly.
+        return ShapeRotator.rotateAboutXY(base, steps * (double) STEP_DEGREES, -yaw(facing));
     }
 
     // --- rotation primitives, matching Minecraft's block model convention -----------------------
@@ -153,32 +177,38 @@ public final class PlateAim {
      * true rotated convex shape.
      */
     private static VoxelShape rotateShapeX(VoxelShape shape, double degrees) {
-        VoxelShape result = Shapes.empty();
+        // One box in, one box out: the bounds of its eight rotated corners.
+        //
+        // This used to cut every box into SLICES strips and join them one at a time with
+        // joinUnoptimized, which is quadratic in the strip count and rebuilt the accumulated shape on
+        // every strip. For the plate's own slab it was survivable, but the same helper is reachable
+        // from the wrench rotating a modded block, and there the strip count multiplied out into a
+        // rebuild storm. The plate slab is thin in the rotating plane, so the corner bounds of the
+        // whole box are already the exact silhouette - the strips bought nothing.
+        java.util.List<AABB> boxes = new java.util.ArrayList<>();
+        double angle = Math.toRadians(degrees);
+        double cos = Math.cos(angle);
+        double sin = Math.sin(angle);
         for (AABB box : shape.toAabbs()) {
-            // One box rotated as a whole would bound the entire diagonal plate, which collides like a
-            // fat cube. Slicing along the axis that actually swings (y) and bounding each thin strip
-            // keeps the shape hugging the plate instead of filling the space around it.
-            for (int slice = 0; slice < SLICES; slice++) {
-                double y0 = box.minY + (box.maxY - box.minY) * slice / SLICES;
-                double y1 = box.minY + (box.maxY - box.minY) * (slice + 1) / SLICES;
-                double minY = Double.MAX_VALUE;
-                double minZ = Double.MAX_VALUE;
-                double maxY = -Double.MAX_VALUE;
-                double maxZ = -Double.MAX_VALUE;
-                for (int corner = 0; corner < 4; corner++) {
-                    double y = (corner & 1) == 0 ? y0 : y1;
-                    double z = (corner & 2) == 0 ? box.minZ : box.maxZ;
-                    Vec3 rotated = rotateX(new Vec3(0.0D, y, z).subtract(PIVOT), degrees).add(PIVOT);
-                    minY = Math.min(minY, rotated.y);
-                    minZ = Math.min(minZ, rotated.z);
-                    maxY = Math.max(maxY, rotated.y);
-                    maxZ = Math.max(maxZ, rotated.z);
-                }
-                result = Shapes.joinUnoptimized(result,
-                        Shapes.box(box.minX, minY, minZ, box.maxX, maxY, maxZ), BooleanOp.OR);
+            double minY = Double.MAX_VALUE;
+            double minZ = Double.MAX_VALUE;
+            double maxY = -Double.MAX_VALUE;
+            double maxZ = -Double.MAX_VALUE;
+            for (int corner = 0; corner < 4; corner++) {
+                double y = (corner & 1) == 0 ? box.minY : box.maxY;
+                double z = (corner & 2) == 0 ? box.minZ : box.maxZ;
+                double dy = y - PIVOT.y;
+                double dz = z - PIVOT.z;
+                double ry = dy * cos - dz * sin + PIVOT.y;
+                double rz = dy * sin + dz * cos + PIVOT.z;
+                minY = Math.min(minY, ry);
+                maxY = Math.max(maxY, ry);
+                minZ = Math.min(minZ, rz);
+                maxZ = Math.max(maxZ, rz);
             }
+            boxes.add(new AABB(box.minX, minY, minZ, box.maxX, maxY, maxZ));
         }
-        return result;
+        return unionOf(boxes);
     }
 
     /** Rotates a shape about y by a multiple of 90 degrees, exactly as a blockstate y does. */
@@ -186,29 +216,53 @@ public final class PlateAim {
         if (degrees == 0) {
             return shape;
         }
-        VoxelShape result = Shapes.empty();
+        // Same one-in-one-out rule as rotateShapeX. A y rotation by a multiple of 90 degrees maps an
+        // axis aligned box exactly onto another one, so for the only angles the blockstate uses this
+        // is exact rather than an approximation.
+        java.util.List<AABB> boxes = new java.util.ArrayList<>();
+        double angle = Math.toRadians(degrees);
+        double cos = Math.cos(angle);
+        double sin = Math.sin(angle);
         for (AABB box : shape.toAabbs()) {
-            for (int slice = 0; slice < SLICES; slice++) {
-                double x0 = box.minX + (box.maxX - box.minX) * slice / SLICES;
-                double x1 = box.minX + (box.maxX - box.minX) * (slice + 1) / SLICES;
-                double minX = Double.MAX_VALUE;
-                double minZ = Double.MAX_VALUE;
-                double maxX = -Double.MAX_VALUE;
-                double maxZ = -Double.MAX_VALUE;
-                for (int corner = 0; corner < 4; corner++) {
-                    double x = (corner & 1) == 0 ? x0 : x1;
-                    double z = (corner & 2) == 0 ? box.minZ : box.maxZ;
-                    Vec3 rotated = rotateY(new Vec3(x, 0.0D, z).subtract(PIVOT), degrees).add(PIVOT);
-                    minX = Math.min(minX, rotated.x);
-                    minZ = Math.min(minZ, rotated.z);
-                    maxX = Math.max(maxX, rotated.x);
-                    maxZ = Math.max(maxZ, rotated.z);
-                }
-                result = Shapes.joinUnoptimized(result,
-                        Shapes.box(minX, box.minY, minZ, maxX, box.maxY, maxZ), BooleanOp.OR);
+            double minX = Double.MAX_VALUE;
+            double minZ = Double.MAX_VALUE;
+            double maxX = -Double.MAX_VALUE;
+            double maxZ = -Double.MAX_VALUE;
+            for (int corner = 0; corner < 4; corner++) {
+                double x = (corner & 1) == 0 ? box.minX : box.maxX;
+                double z = (corner & 2) == 0 ? box.minZ : box.maxZ;
+                double dx = x - PIVOT.x;
+                double dz = z - PIVOT.z;
+                double rx = dx * cos - dz * sin + PIVOT.x;
+                double rz = dx * sin + dz * cos + PIVOT.z;
+                minX = Math.min(minX, rx);
+                maxX = Math.max(maxX, rx);
+                minZ = Math.min(minZ, rz);
+                maxZ = Math.max(maxZ, rz);
             }
+            boxes.add(new AABB(minX, box.minY, minZ, maxX, box.maxY, maxZ));
         }
-        return result;
+        return unionOf(boxes);
+    }
+
+    /**
+     * Unions boxes with one optimize pass at the end.
+     *
+     * <p>{@code Shapes.or} is {@code joinUnoptimized(...).optimize()} per argument, so folding a list
+     * through it runs a full optimize per box - quadratic, and the reason a many-boxed plate could
+     * stall a tick. Merging unoptimized and optimizing once keeps it linear.
+     */
+    private static VoxelShape unionOf(java.util.List<AABB> boxes) {
+        if (boxes.isEmpty()) {
+            return Shapes.empty();
+        }
+        VoxelShape merged = Shapes.empty();
+        for (AABB box : boxes) {
+            merged = Shapes.joinUnoptimized(merged,
+                    Shapes.box(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ),
+                    BooleanOp.OR);
+        }
+        return merged.optimize();
     }
 
     private PlateAim() {

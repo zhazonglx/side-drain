@@ -54,8 +54,19 @@ public final class CarryBlockRender {
             if (centreOnOrigin) {
                 poseStack.translate(-0.5D, -0.5D, -0.5D);
             }
-            minecraft.getBlockRenderer().renderSingleBlock(state, poseStack, buffers,
-                    packedLight, OverlayTexture.NO_OVERLAY);
+            // Draw through the model's own render types rather than renderSingleBlock, which routes
+            // every model through the ENTITY render type. A held block drawn on the entity path
+            // loses block lightmap and shader block programs, so it looked flat and unlit next to
+            // the world around it.
+            BlockRenderDispatcher dispatcher = minecraft.getBlockRenderer();
+            net.minecraft.client.resources.model.BakedModel model = dispatcher.getBlockModel(state);
+            var random = net.minecraft.util.RandomSource.create(42L);
+            for (net.minecraft.client.renderer.RenderType type
+                    : model.getRenderTypes(state, random, net.minecraftforge.client.model.data.ModelData.EMPTY)) {
+                dispatcher.getModelRenderer().renderModel(poseStack.last(), buffers.getBuffer(type), state,
+                        model, 1.0F, 1.0F, 1.0F, packedLight, OverlayTexture.NO_OVERLAY,
+                        net.minecraftforge.client.model.data.ModelData.EMPTY, type);
+            }
             return true;
         }
         // A block entity model, or a carried thing that has no block state at all (a modded

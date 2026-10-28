@@ -82,9 +82,25 @@ public class RotatedBlock extends BaseEntityBlock {
         builder.add(YAW, PITCH, FACING);
     }
 
+    /**
+     * The carrier is drawn by the chunk mesher, as a normal block.
+     *
+     * <p>This used to be {@link RenderShape#INVISIBLE}, with the wrapped block drawn from a block
+     * entity renderer. That approach could not reproduce the chunk mesher's work: the lightmap, the
+     * ambient-occlusion pass, the shadow map and the shader pack's terrain phase are all applied
+     * while a section is meshed, and a re-tessellation in the render pass only approximates them. The
+     * visible symptoms were a block that rendered darker than its neighbours, AO gradients that did
+     * not match, and flicker from geometry submitted outside the mesh lifecycle.
+     *
+     * <p>Returning {@code MODEL} lets the mesher draw the carrier like any other block. The rotation
+     * is not in the block state it tessellates - it is baked into the model,
+     * {@link com.sidedrain.client.RotatedBlockModel}, which the model data supplies for the current
+     * yaw and pitch. Because the rotation is already in the vertices, the mesher's lighting, culling
+     * and shading all operate on the real, turned geometry.
+     */
     @Override
     public RenderShape getRenderShape(BlockState state) {
-        return RenderShape.INVISIBLE;
+        return RenderShape.MODEL;
     }
 
     @Nullable
@@ -126,20 +142,31 @@ public class RotatedBlock extends BaseEntityBlock {
      * (the entity-aware collision shapes) it hands back a different instance and the cache simply
      * misses, which keeps the result correct instead of pinning one entity's shape for all of them.
      */
-    private record ShapeKey(VoxelShape raw, int yaw, int pitch) {
+    private record ShapeKey(VoxelShape raw, int yaw, int pitch, double px, double py, double pz) {
     }
 
-    private static VoxelShape rotateCached(VoxelShape raw, BlockState carrier) {
+    private static VoxelShape rotateCached(VoxelShape raw, BlockState carrier, @Nullable BlockState inner) {
         int yaw = carrier.getValue(YAW);
         int pitch = carrier.getValue(PITCH);
-        ShapeKey key = new ShapeKey(raw, yaw, pitch);
+        // The pivot belongs in the key, not just a "is a pair" flag: vanilla gives the head and the
+        // foot of a bed the very same static collision shape, so keying on the shape alone made the
+        // foot read the head's rotated box and the pair drifted apart again.
+        // The pivot has to be part of the key. Vanilla hands the head and the foot of a bed the very
+        // same static VoxelShape instance, so keying on the shape alone made the foot read the box
+        // the head had computed - and since the two halves turn about mirrored pivots, that put
+        // them back out of step.
+        double[] pivot = pairPivot(inner);
+        boolean pair = pivot != null;
+        ShapeKey key = pair
+                ? new ShapeKey(raw, yaw, pitch, pivot[0], pivot[1], pivot[2])
+                : new ShapeKey(raw, yaw, pitch, -1.0D, -1.0D, -1.0D);
         VoxelShape cached = SHAPE_CACHE.get(key);
         if (cached != null) {
             return cached;
         }
         VoxelShape built;
         try {
-            built = rotateShape(raw, carrier);
+            built = rotateShape(raw, carrier, inner);
         } catch (RuntimeException | StackOverflowError failure) {
             // A modded shape that cannot be rotated must not take the server thread with it. This
             // runs inside block updates, so an exception here aborts the tick and, for a block the
@@ -161,7 +188,13 @@ public class RotatedBlock extends BaseEntityBlock {
         }
         // This state was not pre-computed - the block was rotated before the warm-up finished, or
         // the warm-up was skipped. Kick off the rest of the set so the next turn is a cache read.
-        com.sidedrain.util.ShapeWarmup.warmRotatedShapes(raw);
+        //
+        // Not for a pair half: the warm-up pre-computes centre-pivot shapes, and a bed half turns
+        // about the middle of the whole bed instead. Warming it would spend a worker pass filling
+        // entries this state can never read.
+        if (!pair) {
+            com.sidedrain.util.ShapeWarmup.warmRotatedShapes(raw);
+        }
         return built;
     }
 
@@ -179,29 +212,123 @@ public class RotatedBlock extends BaseEntityBlock {
      * and {@link ShapeRotator#spinY} takes quarter turns of {@code -90} per step, matching
      * {@code Axis.YP.rotationDegrees(-yaw)}.
      */
-    private static VoxelShape rotateShape(VoxelShape shape, BlockState state) {
+    private static VoxelShape rotateShape(VoxelShape shape, BlockState state, @Nullable BlockState inner) {
         int yaw = state.getValue(YAW);
         int pitch = state.getValue(PITCH);
-        VoxelShape result = ShapeRotator.rotateAboutX(shape, pitch * 45.0D);
-        return ShapeRotator.rotateAboutY(result, -yaw * 45.0D);
+        // One composed pass, not two.
+        //
+        // Rotating about x and then about y slices the shape twice, and the second pass sees every
+        // strip the first one produced - so the strip count is squared and a 45/45 carrier went to
+        // hundreds of boxes per source box, which is what made the collision box expensive to build.
+        // ShapeRotator.rotateAboutXY composes both rotations into one matrix and slices once, which
+        // keeps the real diagonal on both axes at a linear cost.
+        // A bed is ONE object two blocks long, so both halves turn about the middle of the whole
+        // bed. Turning each half about its own centre is what scissored the pair apart into a
+        // diamond: the two halves then rotate around different points and stop being parallel.
+        //
+        // Rotating about the pair centre does move each half's geometry away from its own cell -
+        // that is unavoidable for a two-block object and it is also correct: both halves move by
+        // the SAME rigid transform, so they stay one block apart, and the result reads as a single
+        // bed turned in space. The collision box follows the same transform, so it stays in step
+        // with what is drawn.
+        double[] pivot = pairPivot(inner);
+        if (pivot == null) {
+            return ShapeRotator.rotateAboutXY(shape, pitch * 45.0D, -yaw * 45.0D);
+        }
+        return ShapeRotator.rotateAboutXY(shape, pitch * 45.0D, -yaw * 45.0D,
+                pivot[0], pivot[1], pivot[2]);
+    }
+
+    /**
+     * The point a wrapped two-block structure turns about, in block units, or {@code null} when the
+     * carrier holds an ordinary single block.
+     *
+     * <p>A bed is one object two blocks long. Rotating each half about its own centre swings the
+     * halves around separate points, so they scissor apart into a diamond - which is exactly the
+     * bug this fixes. The pair turns about the middle of the whole bed, which for either half is
+     * half a block along {@code FACING} from that half's own centre. {@code FACING} points head to
+     * foot, so the midpoint always sits half a block towards the other half.
+     *
+     * <p>The pivot is expressed per half and is therefore always {@code (0.5, 0.5, 0.5)} plus half
+     * a block along the bed axis: both halves compute the same world point because one adds
+     * {@code +FACING/2} and the other {@code -FACING/2}, and they sit on opposite ends of it.
+     */
+    @Nullable
+    private static double[] pairPivot(@Nullable BlockState inner) {
+        // Only a bed is turned as a rigid pair here; other pairs (doors, tall flowers) are rebuilt
+        // from their own orientation properties by the wrench, so they never reach this path.
+        if (inner == null || !(inner.getBlock() instanceof net.minecraft.world.level.block.BedBlock)) {
+            return null;
+        }
+        net.minecraft.core.Direction facing = inner.getValue(net.minecraft.world.level.block.BedBlock.FACING);
+        // FACING runs foot -> head, the opposite of what its name suggests. Vanilla places the FOOT
+        // where the player clicked and the HEAD one step along FACING, so the head's partner lies at
+        // head.relative(FACING.getOpposite()). The middle of the bed is therefore half a block from
+        // either half's centre towards the OTHER half: the head steps along -FACING, the foot along
+        // +FACING. Getting this backwards moves the pivot a whole block off, which pushes the two
+        // halves apart instead of joining them - it made the bed worse, not better.
+        boolean head = inner.getValue(net.minecraft.world.level.block.BedBlock.PART)
+                == net.minecraft.world.level.block.state.properties.BedPart.HEAD;
+        double step = head ? -0.5D : 0.5D;
+        return new double[]{
+                0.5D + facing.getStepX() * step,
+                0.5D + facing.getStepY() * step,
+                0.5D + facing.getStepZ() * step};
     }
 
     @Override
     public VoxelShape getShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext context) {
         BlockState inner = innerState(level, pos);
-        return inner == null ? Shapes.empty() : rotateCached(inner.getShape(level, pos, context), state);
+        if (inner == null) {
+            return Shapes.empty();
+        }
+        VoxelShape raw = inner.getShape(level, pos, context);
+        // A decorative block gets the plain bounding box of its model instead of a staircase.
+        //
+        // Nothing collides with a flower, a vine or a painting, so a full-resolution diagonal on the
+        // outline is invisible to gameplay while costing exactly as much to build as a solid block.
+        // Its outline only has to hug the model, and the bounding box does that.
+        if (ShapeRotator.isDecorative(inner.getCollisionShape(level, pos, context))) {
+            return rotateBox(raw, state);
+        }
+        return rotateCached(raw, state, inner);
     }
 
     @Override
     public VoxelShape getCollisionShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext context) {
         BlockState inner = innerState(level, pos);
-        return inner == null ? Shapes.empty() : rotateCached(inner.getCollisionShape(level, pos, context), state);
+        if (inner == null) {
+            return Shapes.empty();
+        }
+        VoxelShape raw = inner.getCollisionShape(level, pos, context);
+        // Decorative blocks keep their (usually empty) collision shape rotated as a plain box. They
+        // are not stood on, so precision here is wasted work.
+        if (ShapeRotator.isDecorative(raw)) {
+            return rotateBox(raw, state);
+        }
+        return rotateCached(raw, state, inner);
     }
 
     @Override
     public VoxelShape getInteractionShape(BlockState state, BlockGetter level, BlockPos pos) {
         BlockState inner = innerState(level, pos);
-        return inner == null ? Shapes.empty() : rotateCached(inner.getInteractionShape(level, pos), state);
+        return inner == null ? Shapes.empty()
+                : rotateCached(inner.getInteractionShape(level, pos), state, inner);
+    }
+
+    /**
+     * Rotates a shape as a single box: the bounds of its rotated corners.
+     *
+     * <p>Used for decorative blocks, where the exact silhouette of the outline does not matter and
+     * the staircase would only cost time.
+     */
+    private static VoxelShape rotateBox(VoxelShape shape, BlockState carrier) {
+        if (shape.isEmpty()) {
+            return Shapes.empty();
+        }
+        int yaw = carrier.getValue(YAW);
+        int pitch = carrier.getValue(PITCH);
+        return ShapeRotator.boundingRotate(shape, pitch * 45.0D, -yaw * 45.0D);
     }
 
     @Override
@@ -425,6 +552,37 @@ public class RotatedBlock extends BaseEntityBlock {
                 : inner.getDestroyProgress(player, level, pos);
     }
 
+    /**
+     * The wrapped block decides whether the held tool is good enough to harvest it.
+     *
+     * <p>Mining <em>speed</em> already follows the wrapped block through
+     * {@link #getDestroyProgress}: that method asks the state for its destroy speed, and the carrier
+     * state delegates to the wrapped one. What does not follow automatically is the tool gate -
+     * {@code requiresCorrectToolForDrops} is a final field on the block, fixed when the carrier is
+     * constructed, so the carrier would otherwise demand (or not demand) a pickaxe regardless of what
+     * it wraps. That is what made a rotated dirt block need a pickaxe. This override supplies the
+     * per-block answer, and the drop rules themselves still come from the wrapped loot table in
+     * {@code RotatedBlockEntity.getDrops}.
+     */
+    @Override
+    public boolean canHarvestBlock(BlockState state, BlockGetter level, BlockPos pos, Player player) {
+        BlockState inner = innerState(level, pos);
+        return inner != null && inner.canHarvestBlock(level, pos, player);
+    }
+
+    /**
+     * A rotated vine, ladder or scaffolding stays climbable.
+     *
+     * <p>Vanilla asks the block whether it is a ladder, and a carrier is not a vine - so without this
+     * a rotated vine was a decoration you fell off. The wrapped state is asked instead.
+     */
+    @Override
+    public boolean isLadder(BlockState state, net.minecraft.world.level.LevelReader level,
+                            BlockPos pos, net.minecraft.world.entity.LivingEntity entity) {
+        BlockState inner = innerState(level, pos);
+        return inner != null && inner.getBlock().isLadder(inner, level, pos, entity);
+    }
+
     @Override
     public float getExplosionResistance(BlockState state, BlockGetter level, BlockPos pos,
                                         Explosion explosion) {
@@ -497,8 +655,87 @@ public class RotatedBlock extends BaseEntityBlock {
             if (inner != null) {
                 inner.getBlock().onRemove(inner, level, pos, inner, isMoving);
             }
+            // A wrapped bed is two carriers holding the two halves of ONE bed, so removing one half
+            // has to remove the other - that is what vanilla does, and without it a rotated bed left
+            // a orphaned half standing in the world, which is not a bed at all.
+            breakBedPartner(level, pos, inner);
+            // A wrapped double plant is the same problem: tall grass, a large fern or a tall flower
+            // is one object in two cells, so breaking one half must take the other with it. Without
+            // this, breaking the lower half of a rotated tall grass left its upper half floating.
+            breakDoublePlantPartner(level, pos, inner);
         }
         super.onRemove(state, level, pos, newState, isMoving);
+    }
+
+    /**
+     * Removes the other half of a wrapped bed when one half is broken.
+     *
+     * <p>Vanilla {@code BedBlock.playerWillDestroy} removes the partner through
+     * {@code getBlockState(pos.relative(FACING))}, which on a carrier finds another carrier and then
+     * fails its {@code is(this)} test - so the partner survived and the player was left with half a
+     * bed. The partner is looked up through the wrapped bed state instead.
+     *
+     * <p>The partner is removed with {@code setBlock(AIR)} rather than by dropping it, so breaking a
+     * bed still yields exactly one bed item - the head's, which {@link #getDrops} already restricts.
+     */
+    private static void breakBedPartner(Level level, BlockPos pos, @Nullable BlockState inner) {
+        if (level.isClientSide || inner == null
+                || !(inner.getBlock() instanceof net.minecraft.world.level.block.BedBlock)) {
+            return;
+        }
+        BlockPos partner = com.sidedrain.util.MultiBlockHelper.otherHalf(pos, inner);
+        if (partner == null) {
+            return;
+        }
+        BlockState partnerState = level.getBlockState(partner);
+        if (!(partnerState.getBlock() instanceof RotatedBlock)) {
+            return;
+        }
+        BlockState partnerInner = innerState(level, partner);
+        if (partnerInner == null
+                || !(partnerInner.getBlock() instanceof net.minecraft.world.level.block.BedBlock)
+                || partnerInner.getBlock() != inner.getBlock()) {
+            return;
+        }
+        // setBlock with flag 2 (no neighbour update cascade) so the partner's own onRemove does not
+        // bounce back here and recurse.
+        level.setBlock(partner, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(),
+                Block.UPDATE_CLIENTS);
+    }
+
+    /**
+     * Removes the other half of a wrapped double plant when one half is broken.
+     *
+     * <p>Tall grass, a large fern and a tall flower are one plant in two cells. Vanilla keeps them
+     * together through {@code DoublePlantBlock.updateShape}, which only recognises another
+     * {@code DoublePlantBlock} above or below - on a carrier that test fails, so the surviving half
+     * stayed behind as a floating orphan. The partner is therefore looked up through the wrapped
+     * state, exactly like the bed path.
+     *
+     * <p>Only the LOWER half drops an item for these plants, which is why the upper half is cleared
+     * with {@code UPDATE_CLIENTS}: it must disappear without producing a second drop.
+     */
+    private static void breakDoublePlantPartner(Level level, BlockPos pos, @Nullable BlockState inner) {
+        if (level.isClientSide || inner == null
+                || !(inner.getBlock() instanceof net.minecraft.world.level.block.DoublePlantBlock)) {
+            return;
+        }
+        BlockPos partner = com.sidedrain.util.MultiBlockHelper.otherHalf(pos, inner);
+        if (partner == null) {
+            return;
+        }
+        BlockState partnerState = level.getBlockState(partner);
+        if (!(partnerState.getBlock() instanceof RotatedBlock)) {
+            return;
+        }
+        BlockState partnerInner = innerState(level, partner);
+        if (partnerInner == null || partnerInner.getBlock() != inner.getBlock()) {
+            return;
+        }
+        // Flag 2 (clients only, no neighbour cascade) so the partner's own onRemove does not bounce
+        // back here and recurse.
+        level.setBlock(partner, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(),
+                Block.UPDATE_CLIENTS);
     }
 
     /** Comparator output and block events still reach the wrapped block. */
@@ -605,7 +842,26 @@ public class RotatedBlock extends BaseEntityBlock {
                 != net.minecraft.world.level.block.state.properties.BedPart.HEAD) {
             return List.of();
         }
+        // A wrapped double plant is the same story: vanilla's tall_grass / large_fern / tall flower
+        // loot tables give the item only for the LOWER half, and only when the upper half is still
+        // there. The carrier holds each half separately, so asking both halves would either drop the
+        // plant twice or, worse, drop nothing because the "same block above" check fails on a
+        // carrier. The lower half is the one that owns the drop.
+        if (inner.getBlock() instanceof net.minecraft.world.level.block.DoublePlantBlock
+                && inner.getValue(net.minecraft.world.level.block.DoublePlantBlock.HALF)
+                != net.minecraft.world.level.block.state.properties.DoubleBlockHalf.LOWER) {
+            return List.of();
+        }
         BlockEntity wrapped = rotated.createInnerEntity(builder.getLevel());
+        // A double plant needs its own drop logic, because its loot table cannot be asked here.
+        //
+        // Both tall_grass and large_fern are guarded by a location_check one cell up for the other
+        // half, and tall flowers are not: asked about a carrier's position, that check finds another
+        // ROTATED_BLOCK and fails, so a rotated tall grass dropped nothing at all. The pair really is
+        // there - it is just wrapped - so the drop is computed from the plant itself below.
+        if (inner.getBlock() instanceof net.minecraft.world.level.block.DoublePlantBlock plant) {
+            return doublePlantDrops(plant, inner, builder);
+        }
         List<ItemStack> drops = Block.getDrops(inner, builder.getLevel(), rotated.getBlockPos(), wrapped);
         if (!drops.isEmpty()) {
             // A broken rotated block keeps its identity: the drop is renamed the same way the clone
@@ -621,6 +877,50 @@ public class RotatedBlock extends BaseEntityBlock {
         // the block is never lost.
         ItemStack fallback = namedItemFor(inner);
         return fallback.isEmpty() ? List.of() : List.of(fallback);
+    }
+
+    /**
+     * The drop for a wrapped double plant, worked out from the plant rather than its loot table.
+     *
+     * <p>Vanilla's {@code tall_grass} and {@code large_fern} loot tables are both gated on a
+     * {@code location_check} one cell up for the other half of the pair. Asked about a carrier's
+     * position that check finds another {@code ROTATED_BLOCK} and fails, so a rotated tall grass
+     * dropped nothing at all - the plant was there, the lookup simply could not see it.
+     *
+     * <p>Rather than reimplementing each plant separately, the loot table is evaluated at a scratch
+     * position the pair's own layout is rebuilt in: this is only reached for the LOWER half (the
+     * upper half returns early above), so the upper cell of the scratch pair holds the plant's upper
+     * state. Vanilla's loot table then sees exactly the world it expects and produces the normal
+     * result - shears give two of the plant, bare hands give the plant plus the usual seed chance.
+     */
+    private static List<ItemStack> doublePlantDrops(net.minecraft.world.level.block.DoublePlantBlock plant,
+                                                    BlockState inner, LootParams.Builder builder) {
+        // The plant's own item: tall grass -> grass, large fern -> fern, a tall flower -> itself.
+        ItemStack own = new ItemStack(plant.asItem());
+        if (own.isEmpty()) {
+            return List.of();
+        }
+        // Shears are the one tool that changes the result: two of the plant instead of one. The tool
+        // is read from the loot parameters the break handed over.
+        ItemStack tool = builder.getOptionalParameter(LootContextParams.TOOL);
+        int count = 1;
+        if (tool != null && tool.is(net.minecraft.world.item.Items.SHEARS)) {
+            count = 2;
+        }
+        List<ItemStack> drops = new java.util.ArrayList<>(2);
+        ItemStack harvest = own.copy();
+        harvest.setCount(count);
+        harvest.setHoverName(nameFor(inner));
+        drops.add(harvest);
+        // A bare-handed break also rolls vanilla's seed chance, which is the second pool of the loot
+        // table. Keeping it means a rotated tall grass is worth exactly what an unrotated one is.
+        if (count == 1) {
+            RandomSource random = builder.getLevel().getRandom();
+            if (random.nextFloat() < 0.125F) {
+                drops.add(new ItemStack(net.minecraft.world.item.Items.WHEAT_SEEDS));
+            }
+        }
+        return drops;
     }
 
     @Override

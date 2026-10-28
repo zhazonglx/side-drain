@@ -242,7 +242,25 @@ public final class CarryManager {
             display = new ItemStack(state.getBlock().asItem());
         }
         if (display.isEmpty()) {
+            // A block placed by a mod that has no BlockItem at all - a Sophisticated Backpacks
+            // backpack is exactly this: the world holds a BackpackBlock, the item that placed it is
+            // an item with no block form. new ItemStack(block) yields AIR for such a block, so the
+            // glove carried nothing recognisable and reported "empty" while actually holding a
+            // backpack. Fall back to the block's own name on a structure-void-free placeholder so
+            // the carry state is always visible and always droppable.
             display = new ItemStack(state.getBlock());
+        }
+        if (display.isEmpty()) {
+            // A block registered without the usual BlockItem mapping - Sophisticated Backpacks is
+            // the reference case - still has an item somewhere that can place it. Search the item
+            // registry for a BlockItem pointing at this block before giving up.
+            display = itemForBlock(state.getBlock());
+        }
+        if (display.isEmpty()) {
+            // Last resort: a named paper is still a truthful, non-empty display for a block that
+            // genuinely has no item form. The real payload is the State/Entity NBT, not this stack.
+            display = new ItemStack(net.minecraft.world.item.Items.PAPER);
+            display.setHoverName(state.getBlock().getName());
         }
 
         CompoundTag blockTag = new CompoundTag();
@@ -255,6 +273,38 @@ public final class CarryManager {
             entityTag.remove("z");
             entityTag.remove("id");
             blockTag.put("Entity", entityTag);
+        }
+        // A bed, a door or a tall flower is two blocks that only work as a pair. Lifting one half
+        // used to leave the other half standing in the world as a ghost, and putting it back placed
+        // a single half that could never be used. Record the partner's state and where it sits
+        // relative to the lifted half, then remove it too.
+        if (com.sidedrain.util.MultiBlockHelper.isDouble(state)) {
+            BlockPos otherPos = com.sidedrain.util.MultiBlockHelper.otherHalf(pos, state);
+            if (otherPos != null && level.isLoaded(otherPos)) {
+                BlockState otherState = level.getBlockState(otherPos);
+                if (otherState.is(state.getBlock())) {
+                    CompoundTag otherTag = new CompoundTag();
+                    otherTag.put("State", NbtUtils.writeBlockState(otherState));
+                    // Offset of the partner from the lifted half, so putting it down can rebuild the
+                    // pair at the same relative position whatever the new facing is.
+                    BlockPos delta = otherPos.subtract(pos);
+                    otherTag.putInt("dx", delta.getX());
+                    otherTag.putInt("dy", delta.getY());
+                    otherTag.putInt("dz", delta.getZ());
+                    BlockEntity otherEntity = level.getBlockEntity(otherPos);
+                    if (otherEntity != null) {
+                        CompoundTag otherEntityTag = otherEntity.saveWithoutMetadata();
+                        otherEntityTag.remove("x");
+                        otherEntityTag.remove("y");
+                        otherEntityTag.remove("z");
+                        otherEntityTag.remove("id");
+                        otherTag.put("Entity", otherEntityTag);
+                    }
+                    blockTag.put("Partner", otherTag);
+                    level.removeBlockEntity(otherPos);
+                    level.setBlock(otherPos, Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL);
+                }
+            }
         }
         blockTag.put("Display", display.save(new CompoundTag()));
 
@@ -403,6 +453,24 @@ public final class CarryManager {
         syncTo(player);
     }
 
+    /**
+     * The item that places {@code block}, found by scanning the registry.
+     *
+     * <p>{@code Block.asItem()} only knows about items registered through {@code BlockItem}; a mod
+     * that registers its block and its item separately (or places the block from a plain item) is
+     * invisible to it, which is why a carried Sophisticated Backpacks backpack came back with an
+     * empty display stack and the glove looked empty while it was really holding the backpack.
+     */
+    private static ItemStack itemForBlock(net.minecraft.world.level.block.Block block) {
+        for (net.minecraft.world.item.Item item : net.minecraft.core.registries.BuiltInRegistries.ITEM) {
+            if (item instanceof net.minecraft.world.item.BlockItem blockItem
+                    && blockItem.getBlock() == block) {
+                return new ItemStack(item);
+            }
+        }
+        return ItemStack.EMPTY;
+    }
+
     /** A display stack for a placeable entity: its spawn egg when it has one, else a name tag. */
     private static ItemStack entityDisplay(net.minecraft.world.entity.Entity entity) {
         net.minecraft.world.item.SpawnEggItem egg =
@@ -462,11 +530,55 @@ public final class CarryManager {
             if (blockTag.contains("Plates", 9)) {
                 com.sidedrain.util.CarryPayload.reattachPlates(level, pos, blockTag.getList("Plates", 10));
             }
+            // Rebuild the other half of a two-block structure. The partner is placed at the same
+            // relative offset it had before, and if that cell is blocked the partner is dropped as an
+            // item rather than being silently lost - a bed that is only half placed cannot be slept
+            // in, which is the bug this exists to prevent.
+            if (blockTag.contains("Partner", 10)) {
+                restorePartner(level, pos, blockTag.getCompound("Partner"));
+            }
         } catch (Exception exception) {
             // A modded block whose block entity throws on load must not lock the glove.
         }
         clearCarry(player, owner);
         return true;
+    }
+
+    /**
+     * Puts back the second half of a bed, door or tall flower.
+     *
+     * <p>The offset is stored relative to the half that was carried, so the pair is rebuilt in the
+     * same shape wherever the player puts it down. If the target cell is occupied the partner is
+     * dropped as an item instead of overwriting whatever is there.
+     */
+    private static void restorePartner(ServerLevel level, BlockPos origin, CompoundTag partnerTag) {
+        BlockState partnerState = NbtUtils.readBlockState(
+                level.holderLookup(net.minecraft.core.registries.Registries.BLOCK),
+                partnerTag.getCompound("State"));
+        if (partnerState.isAir()) {
+            return;
+        }
+        BlockPos target = origin.offset(
+                partnerTag.getInt("dx"), partnerTag.getInt("dy"), partnerTag.getInt("dz"));
+        if (!level.isLoaded(target) || !level.getBlockState(target).canBeReplaced()) {
+            net.minecraft.world.Containers.dropItemStack(level,
+                    origin.getX() + 0.5D, origin.getY() + 0.5D, origin.getZ() + 0.5D,
+                    new ItemStack(partnerState.getBlock()));
+            return;
+        }
+        level.setBlock(target, partnerState, Block.UPDATE_ALL);
+        if (partnerTag.contains("Entity", 10)) {
+            BlockEntity blockEntity = level.getBlockEntity(target);
+            if (blockEntity != null) {
+                CompoundTag entityTag = partnerTag.getCompound("Entity").copy();
+                entityTag.remove("x");
+                entityTag.remove("y");
+                entityTag.remove("z");
+                entityTag.remove("id");
+                blockEntity.load(entityTag);
+                blockEntity.setChanged();
+            }
+        }
     }
 
     /**

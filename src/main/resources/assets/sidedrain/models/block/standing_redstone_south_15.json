@@ -1,0 +1,243 @@
+﻿{
+  "ambientocclusion": false,
+  "textures": {
+    "particle": "minecraft:block/redstone_dust_dot",
+    "dot": "minecraft:block/redstone_dust_dot",
+    "line": "minecraft:block/redstone_dust_line0",
+    "overlay": "minecraft:block/redstone_dust_overlay"
+  },
+  "elements": [
+    {
+      "from": [
+        0,
+        0,
+        15.75
+      ],
+      "to": [
+        16,
+        16,
+        15.75
+      ],
+      "shade": false,
+      "faces": {
+        "south": {
+          "texture": "#dot",
+          "tintindex": 0
+        },
+        "north": {
+          "texture": "#dot",
+          "tintindex": 0
+        }
+      }
+    },
+    {
+      "from": [
+        0,
+        0,
+        15.75
+      ],
+      "to": [
+        16,
+        16,
+        15.75
+      ],
+      "shade": false,
+      "faces": {
+        "south": {
+          "texture": "#overlay"
+        },
+        "north": {
+          "texture": "#overlay"
+        }
+      }
+    },
+    {
+      "from": [
+        8,
+        4,
+        15.75
+      ],
+      "to": [
+        16,
+        12,
+        15.75
+      ],
+      "shade": false,
+      "faces": {
+        "south": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 270
+        },
+        "north": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 90
+        }
+      }
+    },
+    {
+      "from": [
+        8,
+        4,
+        15.75
+      ],
+      "to": [
+        16,
+        12,
+        15.75
+      ],
+      "shade": false,
+      "faces": {
+        "south": {
+          "texture": "#overlay",
+          "rotation": 270
+        },
+        "north": {
+          "texture": "#overlay",
+          "rotation": 90
+        }
+      }
+    },
+    {
+      "from": [
+        0,
+        4,
+        15.75
+      ],
+      "to": [
+        8,
+        12,
+        15.75
+      ],
+      "shade": false,
+      "faces": {
+        "south": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 90
+        },
+        "north": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 270
+        }
+      }
+    },
+    {
+      "from": [
+        0,
+        4,
+        15.75
+      ],
+      "to": [
+        8,
+        12,
+        15.75
+      ],
+      "shade": false,
+      "faces": {
+        "south": {
+          "texture": "#overlay",
+          "rotation": 90
+        },
+        "north": {
+          "texture": "#overlay",
+          "rotation": 270
+        }
+      }
+    },
+    {
+      "from": [
+        4,
+        8,
+        15.75
+      ],
+      "to": [
+        12,
+        16,
+        15.75
+      ],
+      "shade": false,
+      "faces": {
+        "south": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 180
+        },
+        "north": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 180
+        }
+      }
+    },
+    {
+      "from": [
+        4,
+        8,
+        15.75
+      ],
+      "to": [
+        12,
+        16,
+        15.75
+      ],
+      "shade": false,
+      "faces": {
+        "south": {
+          "texture": "#overlay",
+          "rotation": 180
+        },
+        "north": {
+          "texture": "#overlay",
+          "rotation": 180
+        }
+      }
+    },
+    {
+      "from": [
+        4,
+        0,
+        15.75
+      ],
+      "to": [
+        12,
+        8,
+        15.75
+      ],
+      "shade": false,
+      "faces": {
+        "south": {
+          "texture": "#line",
+          "tintindex": 0
+        },
+        "north": {
+          "texture": "#line",
+          "tintindex": 0
+        }
+      }
+    },
+    {
+      "from": [
+        4,
+        0,
+        15.75
+      ],
+      "to": [
+        12,
+        8,
+        15.75
+      ],
+      "shade": false,
+      "faces": {
+        "south": {
+          "texture": "#overlay"
+        },
+        "north": {
+          "texture": "#overlay"
+        }
+      }
+    }
+  ]
+}

@@ -92,7 +92,14 @@ public final class CarryHandler {
         }
         ItemStack display = BlockGloveItem.carriedDisplay(glove);
         BlockState state = stateOf(glove);
-        return display.isEmpty() && state == null ? NOTHING : new Carried(display, state);
+        // A carried ENTITY has no block state at all - its payload is EntityData plus a display
+        // stack. Testing only "display empty AND state null" made such a glove look empty whenever
+        // the display stack failed to round-trip, even though the server was really carrying the
+        // thing. Ask the glove whether it holds anything instead of inferring it from two fields
+        // that a modded payload may legitimately leave blank.
+        boolean holdsSomething = BlockGloveItem.isCarrying(glove)
+                || !display.isEmpty() || state != null;
+        return holdsSomething ? new Carried(display, state) : NOTHING;
     }
 
     /** Resolves what the local player is carrying. */
@@ -226,6 +233,22 @@ public final class CarryHandler {
             return false;
         }
         BlockHitResult hit = (BlockHitResult) minecraft.hitResult;
+        // A placeable entity can sit in front of the block the ray also hits - a backpack against a
+        // wall reports a BLOCK hit and the entity is never consulted. When lifting, prefer an entity
+        // that is actually in front of that block face.
+        if (!puttingDown) {
+            net.minecraft.world.entity.Entity target = entityUnderCursor(minecraft);
+            if (target != null) {
+                double entityDistance = player.distanceToSqr(target.position());
+                double blockDistance = player.getEyePosition(1.0F)
+                        .distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(hit.getBlockPos()));
+                if (entityDistance <= blockDistance + 1.0D) {
+                    ModNetwork.sendToServer(new CarryRequestPacket(
+                            CarryRequestPacket.PICK_UP_ENTITY, target.getId()));
+                    return true;
+                }
+            }
+        }
         if (puttingDown) {
             // Put it down at the clicked face, or at the player's feet when that spot is occupied -
             // the server walks outwards from there, so a refusal can never strand the player.
@@ -246,11 +269,33 @@ public final class CarryHandler {
         net.minecraft.world.phys.Vec3 eye = minecraft.player.getEyePosition(1.0F);
         net.minecraft.world.phys.Vec3 look = minecraft.player.getViewVector(1.0F);
         net.minecraft.world.phys.Vec3 end = eye.add(look.scale(5.0D));
-        net.minecraft.world.phys.EntityHitResult hit = net.minecraft.world.entity.projectile.ProjectileUtil.getEntityHitResult(
-                minecraft.level, minecraft.player, eye, end,
-                minecraft.player.getBoundingBox().inflate(5.0D),
-                entity -> !entity.isSpectator() && entity.isPickable() && !(entity instanceof LocalPlayer));
-        return hit == null ? null : hit.getEntity();
+        // Do NOT filter on isPickable(): Entity.isPickable() returns false by default and most
+        // placeable modded entities never override it - a Sophisticated Backpacks backpack, a chair,
+        // a display stand. That filter is what made the glove report "nothing to lift" while the
+        // player was staring straight at a backpack. Anything with a real hitbox and no spectator
+        // state is a legitimate target.
+        net.minecraft.world.phys.AABB search = minecraft.player.getBoundingBox().inflate(5.0D);
+        java.util.List<net.minecraft.world.phys.EntityHitResult> candidates = new java.util.ArrayList<>();
+        for (net.minecraft.world.entity.Entity candidate : minecraft.level.getEntities(minecraft.player, search)) {
+            if (candidate.isSpectator() || candidate instanceof LocalPlayer || candidate.isRemoved()) {
+                continue;
+            }
+            // A pickable entity is preferred, but a non-pickable one is still liftable when the
+            // ray actually strikes its bounding box.
+            net.minecraft.world.phys.AABB box = candidate.getBoundingBox();
+            java.util.Optional<net.minecraft.world.phys.Vec3> strike = box.clip(eye, end);
+            if (strike.isEmpty()) {
+                continue;
+            }
+            double distance = eye.distanceToSqr(strike.get());
+            candidates.add(new net.minecraft.world.phys.EntityHitResult(candidate, strike.get()));
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        candidates.sort(java.util.Comparator.comparingDouble(
+                hit -> eye.distanceToSqr(hit.getLocation())));
+        return candidates.get(0).getEntity();
     }
 
     private CarryHandler() {

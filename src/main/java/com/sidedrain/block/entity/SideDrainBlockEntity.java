@@ -29,7 +29,7 @@ import net.minecraft.world.phys.Vec3;
 /**
  * The brain behind the Side Drain Plate.
  *
- * <p>Five modes, each a distinct direction of travel. None of them is a combination that undoes
+ * <p>Six modes, each a distinct direction of travel. None of them is a combination that undoes
  * itself:
  * <ul>
  *   <li>{@link #MODE_DRAIN} - pull items out of the container the plate is clamped onto and spit
@@ -41,6 +41,10 @@ import net.minecraft.world.phys.Vec3;
  *       container: a vacuum that fills a chest.</li>
  *   <li>{@link #MODE_DRAIN_STORE} - pull items out of the clamped container and keep them in the
  *       plate's own twenty-seven slots: a chest that empties a chest.</li>
+ *   <li>{@link #MODE_LEAK} - drain the plate's <em>own</em> twenty-seven slots: the same eject
+ *       behaviour as {@link #MODE_DRAIN}, but pointed at itself instead of at the container it is
+ *       clamped onto. Pair it with {@code MODE_DRAIN_STORE} on the same plate to leak a chest out
+ *       onto the floor one stack at a time.</li>
  * </ul>
  *
  * <p>{@code MODE_DRAIN_FEED} used to exist here: it drained the container and immediately fed the
@@ -74,7 +78,9 @@ public class SideDrainBlockEntity extends RandomizableContainerBlockEntity {
     public static final int MODE_COLLECT_FEED = 3;
     /** Pull items out of the attached container and keep them in the plate's own slots. */
     public static final int MODE_DRAIN_STORE = 4;
-    public static final int MODE_COUNT = 5;
+    /** Drain the plate's own slots, ejecting the items out of the nozzle. */
+    public static final int MODE_LEAK = 5;
+    public static final int MODE_COUNT = 6;
 
     public static final int STRATEGY_RANDOM = 0;
     public static final int STRATEGY_SLOT = 1;
@@ -94,7 +100,19 @@ public class SideDrainBlockEntity extends RandomizableContainerBlockEntity {
     private NonNullList<ItemStack> items = NonNullList.withSize(SLOT_COUNT, ItemStack.EMPTY);
     private final NonNullList<ItemStack> filter = NonNullList.withSize(FILTER_COUNT, ItemStack.EMPTY);
     private ItemStack weapon = ItemStack.EMPTY;
-    private int mode = MODE_DRAIN;
+    /**
+     * The mode a freshly placed plate starts in.
+     *
+     * <p>This used to be {@link #MODE_DRAIN}, which meant a plate dropped onto a chest immediately
+     * began pulling that chest's contents out and throwing them on the floor - a destructive default
+     * for anyone who was only trying to place the plate. {@link #MODE_FEED} is the safe starting
+     * point: a new plate feeds the container it is clamped to and does nothing else until the player
+     * picks a mode in the GUI.
+     *
+     * <p>Only the default changes. Plates already in a world keep the mode in their NBT, so this
+     * does not silently re-configure existing builds.
+     */
+    private int mode = MODE_FEED;
     private int strategy = STRATEGY_RANDOM;
     private int amount = AMOUNT_ONE;
     /** Slot of the attached container to pull from. */
@@ -121,6 +139,14 @@ public class SideDrainBlockEntity extends RandomizableContainerBlockEntity {
 
     private final Container filterView = new FilterView();
     private final Container weaponView = new WeaponView();
+    /**
+     * The plate's own twenty-seven slots, exposed as a {@link Container}.
+     *
+     * <p>Only used so {@link #leak()} can reuse {@link #pickSlot(Container)} and
+     * {@code removeItem}, which keep the strategy handling in one place. Nothing else should hand
+     * this out: it is a view onto {@link #items}, not a second inventory.
+     */
+    private final Container selfView = new SelfView();
 
     private final net.minecraft.world.inventory.ContainerData data =
             new net.minecraft.world.inventory.ContainerData() {
@@ -488,7 +514,12 @@ public class SideDrainBlockEntity extends RandomizableContainerBlockEntity {
         // the chest it is feeding from.
         // Only the two modes that actually take items out of the attached container may own the
         // weapon. A plate that merely collects must never eat the chest it is clamped onto.
-        boolean draining = plate.mode == MODE_DRAIN || plate.mode == MODE_DRAIN_STORE;
+        // The draining family: the two modes that empty the attached container, plus MODE_LEAK, which
+        // empties the plate's own slots. They share this flag because they all spit items out of the
+        // nozzle, so the weapon slot owns them all.
+        boolean draining = plate.mode == MODE_DRAIN
+                || plate.mode == MODE_DRAIN_STORE
+                || plate.mode == MODE_LEAK;
         if (draining && plate.weaponIsMelee()) {
             plate.swingWeapon();
             plate.cooldown = MELEE_INTERVAL;
@@ -504,6 +535,7 @@ public class SideDrainBlockEntity extends RandomizableContainerBlockEntity {
             case MODE_COLLECT -> plate.collect();
             case MODE_COLLECT_FEED -> plate.collectFeed();
             case MODE_DRAIN_STORE -> plate.drainStore();
+            case MODE_LEAK -> plate.leak();
             default -> plate.drain();
         };
         if (draining) {
@@ -581,6 +613,43 @@ public class SideDrainBlockEntity extends RandomizableContainerBlockEntity {
         }
         attached.setChanged();
         this.eject(extracted);
+        return true;
+    }
+
+    /**
+     * Drains the plate's own slots: the mirror image of {@link #drain()}.
+     *
+     * <p>{@code MODE_DRAIN} takes from the container behind the plate and throws the items out of the
+     * nozzle. This mode takes from the plate itself and throws them out of the same nozzle, so a
+     * plate that has been filled by {@code MODE_DRAIN_STORE} (or by hand) can be emptied onto the
+     * floor, into a hopper, or into whatever the nozzle is aimed at.
+     *
+     * <p>The picking strategy, the amount switch and the filter all apply exactly as they do for
+     * {@link #drain()}, because the plate's own slots are exposed through {@link #selfView} and go
+     * through the same {@link #pickSlot(Container)}.
+     *
+     * <p>Like the other two draining modes, a loaded weapon owns the plate: it fires before this
+     * method runs, so a plate with ammunition shoots instead of leaking. Ammunition is looked for in
+     * the filter and in the attached container, never in the plate's own slots, so a leaking plate
+     * cannot chamber its own cargo.
+     */
+    private boolean leak() {
+        int slot = this.pickSlot(this.selfView);
+        if (slot < 0) {
+            return false;
+        }
+        ItemStack source = this.items.get(slot);
+        if (source.isEmpty()) {
+            return false;
+        }
+        int wanted = this.amount == AMOUNT_STACK ? source.getMaxStackSize() : 1;
+        int taken = Math.min(wanted, source.getCount());
+        ItemStack extracted = this.selfView.removeItem(slot, taken);
+        if (extracted.isEmpty()) {
+            return false;
+        }
+        this.eject(extracted);
+        this.setChanged();
         return true;
     }
 
@@ -1188,6 +1257,71 @@ public class SideDrainBlockEntity extends RandomizableContainerBlockEntity {
             }
         }
         return false;
+    }
+
+    // ------------------------------------------------------------------ self view
+
+    /**
+     * Read/write view onto the plate's own slots, used by {@link #leak()}.
+     *
+     * <p>{@code getItem} returns the live stack rather than a copy, exactly like
+     * {@link RandomizableContainerBlockEntity#getItem(int)} does, so the count checks in
+     * {@link #leak()} see the real contents. All writes go through {@link ContainerHelper} so the
+     * clamp to the slot's maximum stack size is the same one the rest of the plate uses.
+     */
+    private final class SelfView implements Container {
+        @Override
+        public int getContainerSize() {
+            return SLOT_COUNT;
+        }
+
+        @Override
+        public boolean isEmpty() {
+            return SideDrainBlockEntity.this.isEmpty();
+        }
+
+        @Override
+        public ItemStack getItem(int slot) {
+            return SideDrainBlockEntity.this.items.get(slot);
+        }
+
+        @Override
+        public ItemStack removeItem(int slot, int amount) {
+            ItemStack result = ContainerHelper.removeItem(SideDrainBlockEntity.this.items, slot, amount);
+            if (!result.isEmpty()) {
+                SideDrainBlockEntity.this.setChanged();
+            }
+            return result;
+        }
+
+        @Override
+        public ItemStack removeItemNoUpdate(int slot) {
+            return ContainerHelper.takeItem(SideDrainBlockEntity.this.items, slot);
+        }
+
+        @Override
+        public void setItem(int slot, ItemStack stack) {
+            SideDrainBlockEntity.this.items.set(slot, stack);
+            if (stack.getCount() > this.getMaxStackSize()) {
+                stack.setCount(this.getMaxStackSize());
+            }
+            SideDrainBlockEntity.this.setChanged();
+        }
+
+        @Override
+        public void setChanged() {
+            SideDrainBlockEntity.this.setChanged();
+        }
+
+        @Override
+        public boolean stillValid(Player player) {
+            return true;
+        }
+
+        @Override
+        public void clearContent() {
+            SideDrainBlockEntity.this.items.clear();
+        }
     }
 
     // ------------------------------------------------------------------ filter view

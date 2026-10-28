@@ -1,0 +1,195 @@
+﻿{
+  "ambientocclusion": false,
+  "textures": {
+    "particle": "minecraft:block/redstone_dust_dot",
+    "dot": "minecraft:block/redstone_dust_dot",
+    "line": "minecraft:block/redstone_dust_line0",
+    "overlay": "minecraft:block/redstone_dust_overlay"
+  },
+  "elements": [
+    {
+      "from": [
+        0.25,
+        0,
+        0
+      ],
+      "to": [
+        0.25,
+        16,
+        16
+      ],
+      "shade": false,
+      "faces": {
+        "west": {
+          "texture": "#dot",
+          "tintindex": 0
+        },
+        "east": {
+          "texture": "#dot",
+          "tintindex": 0
+        }
+      }
+    },
+    {
+      "from": [
+        0.25,
+        0,
+        0
+      ],
+      "to": [
+        0.25,
+        16,
+        16
+      ],
+      "shade": false,
+      "faces": {
+        "west": {
+          "texture": "#overlay"
+        },
+        "east": {
+          "texture": "#overlay"
+        }
+      }
+    },
+    {
+      "from": [
+        0.25,
+        4,
+        8
+      ],
+      "to": [
+        0.25,
+        12,
+        16
+      ],
+      "shade": false,
+      "faces": {
+        "west": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 270
+        },
+        "east": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 90
+        }
+      }
+    },
+    {
+      "from": [
+        0.25,
+        4,
+        8
+      ],
+      "to": [
+        0.25,
+        12,
+        16
+      ],
+      "shade": false,
+      "faces": {
+        "west": {
+          "texture": "#overlay",
+          "rotation": 270
+        },
+        "east": {
+          "texture": "#overlay",
+          "rotation": 90
+        }
+      }
+    },
+    {
+      "from": [
+        0.25,
+        8,
+        4
+      ],
+      "to": [
+        0.25,
+        16,
+        12
+      ],
+      "shade": false,
+      "faces": {
+        "west": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 180
+        },
+        "east": {
+          "texture": "#line",
+          "tintindex": 0,
+          "rotation": 180
+        }
+      }
+    },
+    {
+      "from": [
+        0.25,
+        8,
+        4
+      ],
+      "to": [
+        0.25,
+        16,
+        12
+      ],
+      "shade": false,
+      "faces": {
+        "west": {
+          "texture": "#overlay",
+          "rotation": 180
+        },
+        "east": {
+          "texture": "#overlay",
+          "rotation": 180
+        }
+      }
+    },
+    {
+      "from": [
+        0.25,
+        0,
+        4
+      ],
+      "to": [
+        0.25,
+        8,
+        12
+      ],
+      "shade": false,
+      "faces": {
+        "west": {
+          "texture": "#line",
+          "tintindex": 0
+        },
+        "east": {
+          "texture": "#line",
+          "tintindex": 0
+        }
+      }
+    },
+    {
+      "from": [
+        0.25,
+        0,
+        4
+      ],
+      "to": [
+        0.25,
+        8,
+        12
+      ],
+      "shade": false,
+      "faces": {
+        "west": {
+          "texture": "#overlay"
+        },
+        "east": {
+          "texture": "#overlay"
+        }
+      }
+    }
+  ]
+}

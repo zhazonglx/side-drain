@@ -27,6 +27,7 @@
   "gui.sidedrain.mode.2": "Collect",
   "gui.sidedrain.mode.3": "Collect + Feed",
   "gui.sidedrain.mode.4": "Drain + Store",
+  "gui.sidedrain.mode.5": "Leak",
   "gui.sidedrain.strategy.0": "Random",
   "gui.sidedrain.strategy.1": "Slot",
   "gui.sidedrain.strategy.2": "Most",

@@ -27,6 +27,7 @@
   "gui.sidedrain.mode.2": "收集",
   "gui.sidedrain.mode.3": "收集+输送",
   "gui.sidedrain.mode.4": "抽存",
+  "gui.sidedrain.mode.5": "泄漏",
   "gui.sidedrain.strategy.0": "随机",
   "gui.sidedrain.strategy.1": "指定格",
   "gui.sidedrain.strategy.2": "最多",
