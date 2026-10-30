@@ -75,6 +75,10 @@ public final class WeaponIcon {
      */
     private static final Icon NONE = new Icon(new ResourceLocation("sidedrain", "none"), 0, 0, 0, 0);
 
+    /** TEMP: items whose sprite has been logged. */
+    private static final java.util.Set<Item> DIAG_SEEN =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     /** Icons of ordinary items, keyed by item: the picture never depends on a stack's NBT. */
     private static final Map<Item, Icon> BY_ITEM = new ConcurrentHashMap<>();
 
@@ -432,11 +436,24 @@ public final class WeaponIcon {
             return null;
         }
         TextureAtlasSprite sprite = model.getParticleIcon(ModelData.EMPTY);
+        String src = "particle";
         if (isMissing(sprite)) {
             sprite = firstQuadSprite(model);
+            src = "firstQuad";
         }
         if (isMissing(sprite)) {
+            com.sidedrain.SideDrain.LOGGER.info(
+                    "ATLASDIAG {} -> rejected ({} null={})", stack.getItem(), src, sprite == null);
             return null;
+        }
+        // TEMP DIAGNOSTIC
+        if (DIAG_SEEN.add(stack.getItem())) {
+            com.sidedrain.SideDrain.LOGGER.info(
+                    "ATLASDIAG {} -> {} src={} atlas={} uv=[{},{},{},{}] w={} h={}",
+                    stack.getItem(), sprite.contents().name(), src,
+                    sprite.atlasLocation(), sprite.getU0(), sprite.getV0(),
+                    sprite.getU1(), sprite.getV1(),
+                    sprite.contents().width(), sprite.contents().height());
         }
         return new Icon(sprite.atlasLocation(), sprite.getU0(), sprite.getU1(),
                 sprite.getV0(), sprite.getV1());
@@ -554,6 +571,20 @@ public final class WeaponIcon {
                 .open()) {
             com.mojang.blaze3d.platform.NativeImage image =
                     com.mojang.blaze3d.platform.NativeImage.read(stream);
+            // A weapon whose item texture is really its 3D model's UV sheet must not be painted:
+            // the player gets an unrolled skin instead of the picture they see in their
+            // inventory. Item icons are near-square (16x16, 32x32, 64x64); a UV unwrap is a
+            // long strip. Rejecting anything far from square costs nothing for a real icon and
+            // is the only way to tell the two apart without reading the mod's own data.
+            int w = image.getWidth();
+            int h = image.getHeight();
+            if (h == 0 || (double) Math.max(w, h) / Math.min(w, h) > 2.0D) {
+                com.sidedrain.SideDrain.LOGGER.info(
+                        "Plate weapon icon: {} is {}x{}, not a square icon - skipping"
+                        + " (likely a 3D model UV sheet)", file, w, h);
+                image.close();
+                return null;
+            }
             net.minecraft.client.renderer.texture.DynamicTexture dynamic =
                     new net.minecraft.client.renderer.texture.DynamicTexture(image);
             ResourceLocation registered = minecraft.getTextureManager()
@@ -569,10 +600,35 @@ public final class WeaponIcon {
         }
     }
 
-    /** True for the checkerboard sprite, which must never be painted as if it were a picture. */
+    /**
+     * True when {@code sprite} may be painted on the plate as this weapon's picture.
+     *
+     * <p>Two things disqualify a sprite, and the second is why this exists:
+     *
+     * <ol>
+     *   <li><b>The checkerboard.</b> The missing-texture sprite must never be painted as if it
+     *       were a picture - the plate should stay bare instead.</li>
+     *   <li><b>A sprite that covers the whole atlas.</b> Some models answer
+     *       {@code getParticleIcon} with a sprite whose rectangle is the entire atlas rather than
+     *       one tile. Painting that rectangle does not show the weapon - it spreads hundreds of
+     *       unrelated textures across the face, which is exactly the "the atlas unrolled onto my
+     *       plate" report. An item picture is one small tile of the sheet, so anything spanning
+     *       the full 0..1 range is a wrong answer, not an unusual one.</li>
+     * </ol>
+     */
     private static boolean isMissing(@Nullable TextureAtlasSprite sprite) {
-        return sprite == null || sprite.contents() == null
-                || MissingTextureAtlasSprite.getLocation().equals(sprite.contents().name());
+        if (sprite == null || sprite.contents() == null) {
+            return true;
+        }
+        if (MissingTextureAtlasSprite.getLocation().equals(sprite.contents().name())) {
+            return true;
+        }
+        // An item icon is one small tile of the sheet. If the rectangle spans a large share of
+        // the atlas, the model is not naming a picture - painting it would spread unrelated
+        // textures across the plate. Half the sheet is already far more than any icon needs.
+        float du = sprite.getU1() - sprite.getU0();
+        float dv = sprite.getV1() - sprite.getV0();
+        return du > 0.5F || dv > 0.5F;
     }
 
     /**
