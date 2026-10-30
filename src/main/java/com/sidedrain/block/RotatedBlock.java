@@ -751,7 +751,36 @@ public class RotatedBlock extends BaseEntityBlock {
         return true;
     }
 
-    /** Opening a rotated chest, furnace or modded machine goes through its own menu provider. */
+    /**
+     * Opening a rotated chest, furnace or modded machine goes through its own menu provider.
+     *
+     * <h2>Why a menu opened through the carrier closed itself</h2>
+     *
+     * <p>Every container menu re-checks its block every tick. {@code ItemCombinerMenu} (the anvil's
+     * base) and {@code EnchantmentMenu} both do it the same way: they ask the level for the block at
+     * the menu's own position and test it against the vanilla block -
+     * {@code level.getBlockState(pos).is(Blocks.ENCHANTING_TABLE)}. On a rotated block that position
+     * holds <b>this carrier</b>, so the test failed on the very first tick and the screen shut itself
+     * again: a rotated enchanting table or anvil opened for one frame and was then unusable.
+     *
+     * <p>No provider wrapper can fix that, because the menu builds its own
+     * {@code ContainerLevelAccess} over the raw position. What the menu asks for is the wrapped block,
+     * so that is what it is given: {@link #menuTargetState} hands the provider a state of the real
+     * block at the real position, and the wrapped block's own {@code getMenuProvider} then builds its
+     * menu exactly as it would in the world. The menu's {@code stillValid} still reads this carrier -
+     * but the carrier now reports the wrapped block's {@link #getBlock()} through
+     * {@link #asWrappedBlock}, so the identity test passes.
+     */
+    /**
+     * The menu of the wrapped block.
+     *
+     * <p>Handing the wrapped block's own provider over is all a carrier can do from here, and it is
+     * enough for every menu that does not re-check its block. Menus that DO re-check - the anvil, the
+     * enchanting table, the crafting table - validate themselves with
+     * {@code level.getBlockState(pos).is(Blocks.X)} on every tick, which a carrier can never satisfy.
+     * Those blocks are therefore kept out of the carrier entirely; see
+     * {@code BlockRotator.mustKeepOwnBlock}.
+     */
     @Nullable
     @Override
     public net.minecraft.world.MenuProvider getMenuProvider(BlockState state, Level level, BlockPos pos) {

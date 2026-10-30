@@ -33,6 +33,7 @@ release/*.py
 
 # Scratch probes and caches from development
 __cls/
+__s/
 __pycache__/
 *.pyc
 *.class

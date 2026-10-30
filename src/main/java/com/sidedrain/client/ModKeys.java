@@ -64,6 +64,20 @@ public final class ModKeys {
             GLFW.GLFW_KEY_R,
             CATEGORY);
 
+    /**
+     * Pins the item under the pointer into the plate's filter grid.
+     *
+     * <p>Defaults to {@code C}, which is what the request asked for and is not a vanilla binding. The
+     * key only does anything while the plate panel is open on the filter strategy and a recipe
+     * viewer's sidebar is under the pointer; everywhere else it is inert and the press is drained,
+     * so it can never queue up and fire later.
+     */
+    public static final KeyMapping FILTER_ITEM = new KeyMapping(
+            "key.sidedrain.filter_item",
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_C,
+            CATEGORY);
+
     private ModKeys() {
     }
 
@@ -76,8 +90,9 @@ public final class ModKeys {
 
     /** Logs the bindings once at startup, which is the only way a rebind shows up in a log. */
     static void describe() {
-        SideDrain.LOGGER.debug("Side Drain keys: rotate={} carry={}",
+        SideDrain.LOGGER.debug("Side Drain keys: rotate={} carry={} filter={}",
                 ROTATE.getTranslatedKeyMessage().getString(),
-                CARRY.getTranslatedKeyMessage().getString());
+                CARRY.getTranslatedKeyMessage().getString(),
+                FILTER_ITEM.getTranslatedKeyMessage().getString());
     }
 }

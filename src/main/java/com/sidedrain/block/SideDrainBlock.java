@@ -45,6 +45,17 @@ public class SideDrainBlock extends BaseEntityBlock {
     public static final DirectionProperty FACING = BlockStateProperties.FACING;
 
     /**
+     * True for the expanded plate: the same machine, with twice the storage and a 6 x 6 filter.
+     *
+     * <p>The two plates share one block class and one block entity type, because every behaviour
+     * except the two inventory sizes is identical and duplicating a thousand lines of item movement
+     * to change two integers would guarantee they drift apart. The flag is the only thing that
+     * differs, and it is read exactly twice: when the block entity sizes its inventories, and when
+     * the panel sizes itself.
+     */
+    private final boolean expanded;
+
+    /**
      * The aim of the plate's nozzle, in 45 degree steps away from {@link #FACING}.
      *
      * <p>{@code FACING} still decides which face of the container the plate is clamped to - the
@@ -78,11 +89,24 @@ public class SideDrainBlock extends BaseEntityBlock {
     }
 
     public SideDrainBlock() {
+        this(false);
+    }
+
+    /**
+     * @param expanded true for the expanded plate: 54 storage slots and a 6 x 6 filter grid
+     */
+    public SideDrainBlock(boolean expanded) {
         super(Block.Properties.of().strength(2.5F, 6.0F).noOcclusion());
+        this.expanded = expanded;
         this.registerDefaultState(this.stateDefinition.any()
                 .setValue(FACING, Direction.NORTH)
                 .setValue(TILT, 0)
                 .setValue(SPIN, 0));
+    }
+
+    /** True when this block is the expanded plate. */
+    public boolean isExpanded() {
+        return this.expanded;
     }
 
     @Override
@@ -159,7 +183,14 @@ public class SideDrainBlock extends BaseEntityBlock {
                 return InteractionResult.CONSUME;
             }
             if (player instanceof net.minecraft.server.level.ServerPlayer serverPlayer) {
-                net.minecraftforge.network.NetworkHooks.openScreen(serverPlayer, plate, pos);
+                // The position and both inventory sizes ride the opening packet. The sizes cannot
+                // come from the data slots: those arrive after the client has already built the
+                // menu, so the expanded plate would have opened with a plain plate's grids.
+                net.minecraftforge.network.NetworkHooks.openScreen(serverPlayer, plate, buffer -> {
+                    buffer.writeBlockPos(pos);
+                    buffer.writeVarInt(plate.slotCount());
+                    buffer.writeVarInt(plate.filterCount());
+                });
             }
         }
         return InteractionResult.CONSUME;
@@ -175,7 +206,13 @@ public class SideDrainBlock extends BaseEntityBlock {
         }
     }
 
-    /** Contents travel with the block, like a shulker box. */
+    /**
+     * Contents travel with the block, like a shulker box.
+     *
+     * <p>The dropped stack is built from <b>this</b> block, so an expanded plate drops an expanded
+     * plate and keeps its fifty-four slots; a plain plate drops a plain plate. Deriving the item
+     * from the block rather than from a constant is what keeps the two from being swapped.
+     */
     @Override
     public List<ItemStack> getDrops(BlockState state, LootParams.Builder builder) {
         BlockEntity blockEntity = builder.getOptionalParameter(LootContextParams.BLOCK_ENTITY);

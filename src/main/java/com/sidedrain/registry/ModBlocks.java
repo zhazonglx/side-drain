@@ -17,6 +17,10 @@ public class ModBlocks {
     public static final RegistryObject<Block> SIDE_DRAIN_PLATE =
             BLOCKS.register("side_drain_plate", SideDrainBlock::new);
 
+    /** The same plate with twice the storage (54 slots) and a 6 x 6 filter grid. */
+    public static final RegistryObject<Block> EXPANDED_SIDE_DRAIN_PLATE =
+            BLOCKS.register("expanded_side_drain_plate", () -> new SideDrainBlock(true));
+
     /** Not craftable and not in the creative tab: it only exists as a wrench target. */
     public static final RegistryObject<Block> OMNI_HOPPER =
             BLOCKS.register("omni_hopper", OmniHopperBlock::new);

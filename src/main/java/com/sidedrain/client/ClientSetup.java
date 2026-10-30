@@ -33,6 +33,7 @@ public final class ClientSetup {
             net.minecraftforge.client.event.RegisterKeyMappingsEvent event) {
         event.register(ModKeys.ROTATE);
         event.register(ModKeys.CARRY);
+        event.register(ModKeys.FILTER_ITEM);
     }
 
     @SubscribeEvent
@@ -44,6 +45,9 @@ public final class ClientSetup {
             MenuScreens.register(ModMenus.PERSISTENT_CRAFTING.get(),
                     net.minecraft.client.gui.screens.inventory.CraftingScreen::new);
             BlockEntityRenderers.register(ModBlockEntities.ROTATED_BLOCK.get(), RotatedBlockRenderer::new);
+            // The plate's own slab is drawn by the chunk mesher; this renderer only adds the weapon
+            // standing on its face, which a static model cannot do because the slot changes.
+            BlockEntityRenderers.register(ModBlockEntities.SIDE_DRAIN.get(), SideDrainPlateRenderer::new);
 
             // The redstone panel re-uses vanilla's own dust textures, and every one of them is
             // alpha-tested: redstone_dust_line0 is a thin anti-aliased line on a transparent
@@ -72,6 +76,9 @@ public final class ClientSetup {
                 barrier.wait(null).thenRunAsync(() -> {
                     RotatedBlockRenderer.clearCaches();
                     com.sidedrain.client.PlateAimModel.clearCaches();
+                    // Item models and gun pack art are rebuilt from the new pack too, and the
+                    // weapon-icon cache holds sprites and texture locations from the old one.
+                    com.sidedrain.client.WeaponIcon.clearCaches();
                     com.sidedrain.util.ShapeRotator.clearCache();
                 }, game));
     }
@@ -129,6 +136,14 @@ public final class ClientSetup {
                 "sidedrain", "block/side_drain_plate_up_t0"));
         event.register(new net.minecraft.resources.ResourceLocation(
                 "sidedrain", "block/side_drain_plate_down_t0"));
+        // The expanded plate is the same geometry in a different palette, so its three flat slabs
+        // need the same reference or they are never baked and the plate renders invisible.
+        event.register(new net.minecraft.resources.ResourceLocation(
+                "sidedrain", "block/expanded_side_drain_plate_side_t0"));
+        event.register(new net.minecraft.resources.ResourceLocation(
+                "sidedrain", "block/expanded_side_drain_plate_up_t0"));
+        event.register(new net.minecraft.resources.ResourceLocation(
+                "sidedrain", "block/expanded_side_drain_plate_down_t0"));
     }
 
     private ClientSetup() {

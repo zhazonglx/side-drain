@@ -3,6 +3,7 @@ package com.sidedrain.util;
 import javax.annotation.Nullable;
 import net.minecraft.core.Direction;
 import net.minecraft.core.FrontAndTop;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.AttachFace;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
@@ -36,6 +37,50 @@ public final class BlockRotator {
     };
 
     private BlockRotator() {
+    }
+
+    /**
+     * Blocks whose whole point is a menu that re-checks its own block every tick.
+     *
+     * <p>An enchanting table and an anvil open a {@code MenuProvider} whose menu validates itself with
+     * {@code level.getBlockState(pos).is(Blocks.ENCHANTING_TABLE)}. Lifting one into a
+     * {@link com.sidedrain.block.RotatedBlock} carrier makes that position hold the carrier instead,
+     * so the check fails on the very first tick and the screen shuts itself again: the block "becomes
+     * unusable when rotated", which is exactly the report.
+     *
+     * <p>These blocks therefore must not be wrapped. Turning them is still allowed when the block
+     * state itself has an orientation to turn (an anvil does, an enchanting table does not) - the
+     * rule below only forbids the carrier, never the in-place rotation.
+     */
+    public static boolean mustKeepOwnBlock(BlockState state) {
+        Block block = state.getBlock();
+        return block instanceof net.minecraft.world.level.block.AnvilBlock
+                || block instanceof net.minecraft.world.level.block.EnchantmentTableBlock
+                || block instanceof net.minecraft.world.level.block.GrindstoneBlock
+                || block instanceof net.minecraft.world.level.block.CraftingTableBlock
+                || block instanceof net.minecraft.world.level.block.LoomBlock
+                || block instanceof net.minecraft.world.level.block.CartographyTableBlock
+                || block instanceof net.minecraft.world.level.block.StonecutterBlock
+                || block instanceof net.minecraft.world.level.block.SmithingTableBlock
+                || block instanceof net.minecraft.world.level.block.FletchingTableBlock
+                || block instanceof net.minecraft.world.level.block.BrewingStandBlock
+                || block instanceof net.minecraft.world.level.block.BeaconBlock;
+    }
+
+    /**
+     * The horizontal turn for a block that must keep its own block class.
+     *
+     * <p>An anvil has {@code FACING}, so it can be turned in place and stay an anvil. An enchanting
+     * table has no orientation property at all, so there is genuinely nothing to turn - returning
+     * {@code null} lets the caller report an honest "this block cannot be rotated" instead of
+     * silently converting it into a carrier that no longer works.
+     */
+    @Nullable
+    public static BlockState rotateInPlaceOnly(BlockState state, boolean pitch) {
+        // A vertical turn is only meaningful when the state really has an upside-down form; an anvil
+        // does not, so a pitch click on one is spent rather than wrapping it.
+        BlockState turned = pitch ? rotateVertical(state) : rotateHorizontal(state);
+        return turned != null && turned != state ? turned : null;
     }
 
     /** Returns the rotated state, or {@code null} when this block cannot be turned in place. */

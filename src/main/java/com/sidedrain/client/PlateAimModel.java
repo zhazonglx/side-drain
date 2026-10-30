@@ -60,11 +60,21 @@ import org.joml.Vector3f;
  */
 @OnlyIn(Dist.CLIENT)
 public final class PlateAimModel implements IDynamicBakedModel {
-    /** Where the flat source slabs live, per model family. */
+    /**
+     * Where the flat source slabs live, per model family and per plate size.
+     *
+     * <p>The two plates are the same geometry with different textures, so the family key is
+     * {@code plate / family} and the expanded entries are the same slabs with the expanded palette.
+     * Without the size in the key an expanded plate would render in the plain plate's colours - which
+     * is exactly what would happen if the blockstate pointed both plates at the same model.
+     */
     private static final Map<String, ResourceLocation> SOURCES = Map.of(
-            "side", new ResourceLocation("sidedrain", "block/side_drain_plate_side_t0"),
-            "up", new ResourceLocation("sidedrain", "block/side_drain_plate_up_t0"),
-            "down", new ResourceLocation("sidedrain", "block/side_drain_plate_down_t0"));
+            "plain/side", new ResourceLocation("sidedrain", "block/side_drain_plate_side_t0"),
+            "plain/up", new ResourceLocation("sidedrain", "block/side_drain_plate_up_t0"),
+            "plain/down", new ResourceLocation("sidedrain", "block/side_drain_plate_down_t0"),
+            "expanded/side", new ResourceLocation("sidedrain", "block/expanded_side_drain_plate_side_t0"),
+            "expanded/up", new ResourceLocation("sidedrain", "block/expanded_side_drain_plate_up_t0"),
+            "expanded/down", new ResourceLocation("sidedrain", "block/expanded_side_drain_plate_down_t0"));
 
     /** Cache of turned geometry, keyed by (facing, tilt, spin, layer). */
     private static final Map<Key, List<BakedQuad>[]> CACHE = new ConcurrentHashMap<>();
@@ -95,7 +105,8 @@ public final class PlateAimModel implements IDynamicBakedModel {
     /** The bucket the mesher draws without any culling test. */
     private static final int UNCULLED = Direction.values().length;
 
-    private record Key(int facing, int tilt, int spin, @Nullable RenderType renderType) {
+    private record Key(int facing, int tilt, int spin, @Nullable RenderType renderType,
+                       boolean expanded) {
     }
 
     @Override
@@ -106,7 +117,9 @@ public final class PlateAimModel implements IDynamicBakedModel {
         IntegerProperty spinProperty = com.sidedrain.block.SideDrainBlock.SPIN;
         if (state == null || !state.hasProperty(tiltProperty) || !state.hasProperty(spinProperty)) {
             // An item render or a state without the properties: draw the flat side slab as authored.
-            BakedModel source = sourceModel("side");
+            // The item models are ordinary JSON, so this path is only ever hit by a state that lost
+            // its properties; the plain family is the safe answer.
+            BakedModel source = sourceModel("plain/side");
             return source == null ? List.of() : source.getQuads(null, side,
                     RandomSource.create(42L), ModelData.EMPTY, renderType);
         }
@@ -117,9 +130,11 @@ public final class PlateAimModel implements IDynamicBakedModel {
         final int keyTilt = tilt;
         final int keySpin = spin;
         final RenderType keyLayer = renderType;
+        final boolean expanded = state.getBlock() instanceof com.sidedrain.block.SideDrainBlock block
+                && block.isExpanded();
         List<BakedQuad>[] byFace = CACHE.computeIfAbsent(
-                new Key(keyFacing, keyTilt, keySpin, keyLayer),
-                key -> build(keyFacing, keyTilt, keySpin, keyLayer));
+                new Key(keyFacing, keyTilt, keySpin, keyLayer, expanded),
+                key -> build(keyFacing, keyTilt, keySpin, keyLayer, expanded));
         if (side == null) {
             return byFace[UNCULLED];
         }
@@ -128,13 +143,14 @@ public final class PlateAimModel implements IDynamicBakedModel {
 
     @SuppressWarnings("unchecked")
     private static List<BakedQuad>[] build(int facingOrdinal, int tilt, int spin,
-                                           @Nullable RenderType renderType) {
+                                           @Nullable RenderType renderType, boolean expanded) {
         List<BakedQuad>[] byFace = new List[Direction.values().length + 1];
         for (int i = 0; i < byFace.length; i++) {
             byFace[i] = new ArrayList<>();
         }
         Direction facing = Direction.values()[facingOrdinal];
-        BakedModel source = sourceModel(com.sidedrain.util.PlateAim.modelFamily(facing));
+        BakedModel source = sourceModel((expanded ? "expanded/" : "plain/")
+                + com.sidedrain.util.PlateAim.modelFamily(facing));
         if (source == null) {
             return byFace;
         }
@@ -184,19 +200,15 @@ public final class PlateAimModel implements IDynamicBakedModel {
     }
 
     /**
-     * Builds the model -> world rotation, about the block centre, with the same composition the
-     * collision shape uses: tilt about x first, then spin and face turn about y.
+     * The model -> world rotation, taken straight from {@link PlateAim#renderMatrix}.
+     *
+     * <p>Not rebuilt here. The plate's geometry, its collision shape, its aim vector and the weapon
+     * decal all have to describe one transform; keeping a private copy of the arithmetic is how they
+     * drifted apart in the first place. The constants are shared too, so a change to the tilt step
+     * reaches every consumer at once.
      */
     private static Matrix4f buildTransform(Direction facing, int tilt, int spin) {
-        Matrix4f matrix = new Matrix4f();
-        matrix.translate(0.5F, 0.5F, 0.5F);
-        // Face turn, then spin, both about y: the two are one rotation, and composing them here keeps
-        // the model's transform identical to the shape's Ry(spin - yaw) * Rx(tilt).
-        matrix.rotate(com.mojang.math.Axis.YP.rotationDegrees(spin * 45.0F
-                - com.sidedrain.util.PlateAim.yaw(facing)));
-        matrix.rotate(com.mojang.math.Axis.XP.rotationDegrees(tilt * 45.0F));
-        matrix.translate(-0.5F, -0.5F, -0.5F);
-        return matrix;
+        return com.sidedrain.util.PlateAim.renderMatrix(facing, tilt, spin);
     }
 
     /**
@@ -256,7 +268,7 @@ public final class PlateAimModel implements IDynamicBakedModel {
 
     @Override
     public TextureAtlasSprite getParticleIcon(ModelData data) {
-        BakedModel source = sourceModel("side");
+        BakedModel source = sourceModel("plain/side");
         if (source != null) {
             return source.getParticleIcon(data);
         }

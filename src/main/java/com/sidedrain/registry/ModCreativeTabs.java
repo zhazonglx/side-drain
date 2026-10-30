@@ -18,6 +18,7 @@ public class ModCreativeTabs {
             .displayItems((params, output) -> {
                 output.accept(ModItems.ORIENTATION_WRENCH.get());
                 output.accept(ModItems.SIDE_DRAIN_PLATE.get());
+                output.accept(ModItems.EXPANDED_SIDE_DRAIN_PLATE.get());
                 output.accept(ModItems.BLOCK_GLOVE.get());
                 // The omni hopper and the standing redstone panel are wrench results, not items.
             })

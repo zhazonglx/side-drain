@@ -121,6 +121,22 @@ public class OrientationWrenchItem extends Item {
             return turnCarrier(level, pos, state, pitch);
         }
 
+        // A block whose whole point is a menu that re-checks its own block every tick must keep its
+        // own block class: lifting it into a carrier makes that check fail and the screen shuts
+        // itself again, which is the "a rotated anvil / enchanting table becomes unusable" report.
+        // Such a block is only ever turned in place, and when it has no orientation of its own the
+        // click is honestly spent instead of quietly breaking it.
+        if (BlockRotator.mustKeepOwnBlock(state)) {
+            BlockState turned = BlockRotator.rotateInPlaceOnly(state, pitch);
+            if (turned == null) {
+                return false;
+            }
+            level.setBlock(pos, turned, Block.UPDATE_ALL);
+            level.playSound(null, pos, turned.getSoundType().getHitSound(),
+                    SoundSource.BLOCKS, 0.9F, pitch ? 0.8F : 1.25F);
+            return true;
+        }
+
         BlockState rotated = BlockRotator.rotate(state, pitch);
         // Yaw can always be done in place; a flip only when the block really has an upside-down form.
         if (rotated != null && rotated != state && (!pitch || BlockRotator.hasVerticalForm(state))) {

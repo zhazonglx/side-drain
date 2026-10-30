@@ -26,5 +26,15 @@ public class SideDrainPlateItem extends BlockItem {
         tooltip.add(Component.translatable("tooltip.sidedrain.side_drain_plate.2").withStyle(ChatFormatting.GRAY));
         tooltip.add(Component.translatable("tooltip.sidedrain.side_drain_plate.3").withStyle(ChatFormatting.DARK_GRAY));
         tooltip.add(Component.translatable("tooltip.sidedrain.side_drain_plate.4").withStyle(ChatFormatting.DARK_GRAY));
+        tooltip.add(Component.translatable("tooltip.sidedrain.side_drain_plate.5").withStyle(ChatFormatting.DARK_GRAY));
+        tooltip.add(Component.translatable("tooltip.sidedrain.side_drain_plate.6").withStyle(ChatFormatting.DARK_GRAY));
+        // Only the expanded plate advertises its two sizes; on the plain plate they would just be
+        // two lines saying "27" and "3 x 3" to a player who can see the grid.
+        if (this.getBlock() instanceof com.sidedrain.block.SideDrainBlock plate && plate.isExpanded()) {
+            tooltip.add(Component.translatable("tooltip.sidedrain.expanded_side_drain_plate.1")
+                    .withStyle(ChatFormatting.GOLD));
+            tooltip.add(Component.translatable("tooltip.sidedrain.expanded_side_drain_plate.2")
+                    .withStyle(ChatFormatting.GOLD));
+        }
     }
 }

@@ -68,31 +68,31 @@ public final class MeleeAttacker {
         if (stack.isEmpty()) {
             return false;
         }
-        // Ammunition and launchers are handled by the projectile path.
-        if (ProjectileLauncher.isAmmo(stack)) {
+        // The classification is the single source of truth. This method used to re-derive the answer
+        // with its own rules, which is how a modded bow ended up classified as a melee weapon here
+        // while the launcher considered it ranged. Everything that needs to know now asks
+        // WeaponKind once.
+        return WeaponKind.of(stack).usesTargetTags();
+    }
+
+    /**
+     * True when the stack publishes any main-hand attack damage.
+     *
+     * <p>Used by {@link WeaponKind} as the "it is a weapon of some sort, just not one I recognise"
+     * test, so it is kept separate from the family decision.
+     */
+    public static boolean hasAttackDamage(ItemStack stack) {
+        if (stack.isEmpty()) {
             return false;
         }
-        if (stack.is(net.minecraft.world.item.Items.BOW)
-                || stack.is(net.minecraft.world.item.Items.CROSSBOW)
-                || stack.is(net.minecraft.world.item.Items.TRIDENT)) {
-            return false;
+        var modifiers = stack.getAttributeModifiers(net.minecraft.world.entity.EquipmentSlot.MAINHAND);
+        for (var entry : modifiers.entries()) {
+            if (entry.getKey().getDescriptionId().contains("attack_damage")
+                    && entry.getValue().getAmount() > 0.0D) {
+                return true;
+            }
         }
-        if (stack.getItem() instanceof net.minecraft.world.item.BlockItem) {
-            return false;
-        }
-        // Any attack damage attribute covers vanilla weapons and every modded blade that builds on
-        // SwordItem/TieredItem or sets the attribute directly.
-        if (attackDamage(stack) > 0.0D) {
-            return true;
-        }
-        // Tool-family fallback for modded weapons that keep their damage in custom code. SwordItem
-        // and DiggerItem cover the whole vanilla tool tree and most mods that extend it; anything
-        // else in the pack that swings and is not a block has to be accepted here or it would be
-        // silently ignored by the plate.
-        return stack.getItem() instanceof net.minecraft.world.item.SwordItem
-                || stack.getItem() instanceof net.minecraft.world.item.DiggerItem
-                || stack.getItem() instanceof net.minecraft.world.item.HoeItem
-                || stack.getItem() instanceof net.minecraft.world.item.TridentItem;
+        return false;
     }
 
     /** The weapon's total attack damage, including its attribute modifiers. */
@@ -170,7 +170,14 @@ public final class MeleeAttacker {
      *       like spiders, endermen, bees and unowned wolves.</li>
      * </ul>
      */
-    private static boolean isTargetable(LivingEntity entity, boolean players, boolean monsters,
+    /**
+     * Whether a candidate target is one of the categories the plate is switched on for.
+     *
+     * <p>Made public so the forward-target scanner can ask the same question: a weapon that needs a
+     * target must aim at exactly the things the player already chose with these four switches, not at
+     * a second, quietly different definition of "enemy".
+     */
+    public static boolean isTargetable(LivingEntity entity, boolean players, boolean monsters,
                                         boolean friendlies, boolean neutrals) {
         if (entity instanceof Player) {
             // A plate never hits the player looking at it through this filter unless players are on.

@@ -98,8 +98,22 @@ public final class PlateAim {
      * into and where the items go can no longer disagree.
      */
     public static Vec3 ejectDirection(Direction facing, int tilt, int spin) {
-        return transformNormal(facing, tilt, spin, authoredNormal(facing));
+        // Memoised. This is called several times per plate per tick - by muzzlePos(), the eject
+        // path, the target scan and the shooter aim - and each call would otherwise build a
+        // Matrix4f, a Matrix3f and two vectors. There are only 6 * 8 * 8 = 384 distinct answers for
+        // the whole game, so they are computed once and shared.
+        //
+        // The returned Vec3 is immutable, so sharing one instance between callers is safe.
+        return AIM_CACHE.computeIfAbsent(new AimKey(facing, tilt, spin), key ->
+                transformNormal(key.facing(), key.tilt(), key.spin(),
+                        authoredNormal(key.facing())));
     }
+
+    /** One memoised aim vector per (facing, tilt, spin). */
+    private record AimKey(Direction facing, int tilt, int spin) {
+    }
+
+    private static final Map<AimKey, Vec3> AIM_CACHE = new ConcurrentHashMap<>();
 
     /** The nozzle normal the flat slab is authored with, per model family. */
     private static Vec3 authoredNormal(Direction facing) {
@@ -111,19 +125,69 @@ public final class PlateAim {
     }
 
     /**
+     * The model -> world rotation for one aim, about the middle of the block.
+     *
+     * <p>This is <b>the</b> definition of how a plate is turned. Three things consume it and all
+     * three must agree or the feature falls apart:
+     *
+     * <ol>
+     *   <li>{@code PlateAimModel} transforms the slab's quads with it, so this is what the player
+     *       sees;</li>
+     *   <li>{@link #ejectDirection} transforms the authored nozzle normal with it, so this is where
+     *       items and bullets leave;</li>
+     *   <li>{@code SideDrainPlateRenderer} transforms the weapon decal with it, so the picture is
+     *       painted on the face rather than floating near it.</li>
+     * </ol>
+     *
+     * <p>The third one is why this is public and returns the matrix instead of a direction. An
+     * earlier decal rebuilt a rotation from the aim vector alone - "yaw to the aim's bearing, then
+     * pitch to its elevation" - which is a <em>different</em> rotation whenever the spin ring is
+     * turned: both rotations send the plate's normal to the same place, but they differ by an
+     * arbitrary roll about it, and the picture came out tilted on its own face. Reusing the matrix
+     * removes that whole class of error: there is nothing left to disagree.
+     *
+     * <p>Order and signs are load-bearing. The tilt is about x and is applied <b>inside</b> the
+     * yaw, matching how the models are authored: the 45 degree element rotation happens in the flat
+     * slab's own frame, and the blockstate's face turn is applied to the result. Doing it the other
+     * way sends an east plate's items south.
+     */
+    public static org.joml.Matrix4f renderMatrix(Direction facing, int tilt, int spin) {
+        // Built from a memoised template, then copied for the caller.
+        //
+        // The memo saves the trigonometry and the object churn of composing three rotations every
+        // frame per plate. The copy is not optional: consumers hand this matrix to
+        // {@code Transformation}, which keeps the reference and can transform with it later, so a
+        // shared instance would be a live aliasing bug waiting for the first mutating caller. A copy
+        // of a 4x4 is a handful of floats - far cheaper than rebuilding it from angles.
+        return new org.joml.Matrix4f(template(facing, tilt, spin));
+    }
+
+    /** The shared, never-mutated template for one aim. */
+    private static org.joml.Matrix4f template(Direction facing, int tilt, int spin) {
+        return MATRIX_CACHE.computeIfAbsent(new AimKey(facing, tilt, spin), key -> {
+            org.joml.Matrix4f matrix = new org.joml.Matrix4f();
+            matrix.translate(0.5F, 0.5F, 0.5F);
+            matrix.rotate(com.mojang.math.Axis.YP.rotationDegrees(
+                    key.spin() * STEP_DEGREES - yaw(key.facing())));
+            matrix.rotate(com.mojang.math.Axis.XP.rotationDegrees(key.tilt() * STEP_DEGREES));
+            matrix.translate(-0.5F, -0.5F, -0.5F);
+            return matrix;
+        });
+    }
+
+    /** One memoised transform per (facing, tilt, spin). */
+    private static final Map<AimKey, org.joml.Matrix4f> MATRIX_CACHE = new ConcurrentHashMap<>();
+
+    /**
      * Transforms {@code normal} by the model transform for this aim, returning the unit aim vector.
      *
-     * <p>Keep this matrix literally identical to {@code PlateAimModel.buildTransform} - same axis
-     * objects, same signs, same order. The comment there says why the order matters.
+     * <p>Goes through {@link #renderMatrix}, so the direction cannot drift away from the geometry.
      */
     private static Vec3 transformNormal(Direction facing, int tilt, int spin, Vec3 normal) {
-        org.joml.Matrix4f matrix = new org.joml.Matrix4f();
-        matrix.translate(0.5F, 0.5F, 0.5F);
-        matrix.rotate(com.mojang.math.Axis.YP.rotationDegrees(
-                spin * (float) STEP_DEGREES - yaw(facing)));
-        matrix.rotate(com.mojang.math.Axis.XP.rotationDegrees(tilt * (float) STEP_DEGREES));
-        matrix.translate(-0.5F, -0.5F, -0.5F);
-        org.joml.Vector3f rotated = new org.joml.Matrix3f(matrix)
+        // Reads the shared template directly: Matrix3f copies what it needs out of it and never
+        // writes back, so there is no reason to pay for the defensive copy the public accessor
+        // hands out.
+        org.joml.Vector3f rotated = new org.joml.Matrix3f(template(facing, tilt, spin))
                 .transform(new org.joml.Vector3f((float) normal.x, (float) normal.y, (float) normal.z));
         return new Vec3(rotated.x(), rotated.y(), rotated.z()).normalize();
     }

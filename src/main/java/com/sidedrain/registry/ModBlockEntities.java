@@ -13,9 +13,18 @@ public class ModBlockEntities {
     public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES =
             DeferredRegister.create(ForgeRegistries.BLOCK_ENTITY_TYPES, SideDrain.MODID);
 
+    /**
+     * Both plate blocks share one block entity type.
+     *
+     * <p>They are the same machine; the only difference is the two inventory sizes, which the block
+     * entity reads off its own block. Registering a second type would have meant a second menu, a
+     * second screen and a second copy of every transfer rule.
+     */
     public static final RegistryObject<BlockEntityType<SideDrainBlockEntity>> SIDE_DRAIN =
             BLOCK_ENTITIES.register("side_drain_plate", () -> BlockEntityType.Builder
-                    .of(SideDrainBlockEntity::new, ModBlocks.SIDE_DRAIN_PLATE.get())
+                    .of(SideDrainBlockEntity::new,
+                            ModBlocks.SIDE_DRAIN_PLATE.get(),
+                            ModBlocks.EXPANDED_SIDE_DRAIN_PLATE.get())
                     .build(null));
 
     public static final RegistryObject<BlockEntityType<OmniHopperBlockEntity>> OMNI_HOPPER =

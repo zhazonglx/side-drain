@@ -37,6 +37,13 @@ public final class ModNetwork {
                 .consumerMainThread(SetTargetSlotPacket::handle)
                 .add();
 
+        // Every filter-grid gesture: click a cell, pin from a recipe viewer, or clear the grid.
+        CHANNEL.messageBuilder(FilterPinPacket.class, nextId++, NetworkDirection.PLAY_TO_SERVER)
+                .encoder(FilterPinPacket::encode)
+                .decoder(FilterPinPacket::decode)
+                .consumerMainThread(FilterPinPacket::handle)
+                .add();
+
         CHANNEL.messageBuilder(CarrySyncPacket.class, nextId++, NetworkDirection.PLAY_TO_CLIENT)
                 .encoder(CarrySyncPacket::encode)
                 .decoder(CarrySyncPacket::decode)

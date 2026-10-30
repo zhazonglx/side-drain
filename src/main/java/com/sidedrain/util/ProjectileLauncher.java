@@ -58,11 +58,31 @@ public final class ProjectileLauncher {
         if (id == null) {
             return false;
         }
-        String path = id.getPath();
+        return isAmmoName(id.getPath());
+    }
+
+    /**
+     * True when a registry path names ammunition.
+     *
+     * <p>Split out so {@link WeaponAmmo} can ask the same question about items it discovers by
+     * namespace, and so both use one list of nouns instead of two that drift apart.
+     */
+    public static boolean isAmmoName(String path) {
+        if (path == null || path.isEmpty()) {
+            return false;
+        }
+        // A modded gun's ammunition is usually named for what it is: "9mm_bullet", "rifle_ammo",
+        // "shotgun_shell", "energy_cell". Matching the noun is the only signal available without
+        // depending on the gun mod's classes, and it is the one the request asked for - the plate
+        // should find the bullets in its own storage and spend them.
         return path.contains("bullet") || path.contains("arrow") || path.contains("bolt")
                 || path.contains("projectile") || path.contains("missile") || path.contains("dart")
                 || path.contains("pellet") || path.contains("shell") || path.contains("rocket")
-                || path.contains("grenade") || path.contains("charge");
+                || path.contains("grenade") || path.contains("charge")
+                || path.contains("ammo") || path.contains("magazine") || path.contains("cartridge")
+                || path.contains("round") || path.contains("cell") || path.contains("casing")
+                // Chinese-language packs sometimes romanise instead of translating.
+                || path.contains("zidan") || path.contains("dan");
     }
 
     /**
@@ -96,16 +116,16 @@ public final class ProjectileLauncher {
         if (stack.isEmpty() || isAmmo(stack)) {
             return false;
         }
-        // Melee weapons are the melee path's job, not the launcher's.
-        if (com.sidedrain.util.MeleeAttacker.isMelee(stack)) {
-            return false;
-        }
-        // Blocks are launchers only when they actually dispense (dispenser, dropper).
-        if (stack.getItem() instanceof net.minecraft.world.item.BlockItem blockItem) {
-            Block block = blockItem.getBlock();
-            return block == Blocks.DISPENSER || block == Blocks.DROPPER;
-        }
-        return true;
+        // The classification is the single source of truth; see WeaponKind. The old version asked
+        // MeleeAttacker.isMelee first and then accepted literally everything else, which is how a
+        // pickaxe became a "ranged weapon" and a modded bow became a melee weapon.
+        WeaponKind kind = WeaponKind.of(stack);
+        return kind.isRanged() || kind == WeaponKind.DISPENSER;
+    }
+
+    /** True when the stack is a dispenser or dropper: a launcher body, not ammunition. */
+    public static boolean isDispenser(ItemStack stack) {
+        return WeaponKind.of(stack) == WeaponKind.DISPENSER;
     }
 
     /**
@@ -132,7 +152,18 @@ public final class ProjectileLauncher {
     public static boolean fire(Level level, BlockPos pos, @Nullable Vec3 muzzle, Vec3 aim,
                                ItemStack weapon, ItemStack ammo, int strategy,
                                NonNullList<ItemStack> filter) {
-        if (!(level instanceof ServerLevel serverLevel) || ammo.isEmpty()) {
+        if (!(level instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (ammo.isEmpty()) {
+            // No projectile item to launch. That is a legitimate case: a casting weapon (staff, wand,
+            // spell book) pays for its shot with mana, not with an item, so the plate has to be able
+            // to "fire" with nothing in hand. There is no generic way to make a modded item cast -
+            // the spell lives in the mod's own code - so what this does is the honest best effort:
+            // it reports the shot as attempted so the plate's cooldown and pulse accounting stay
+            // consistent, and the weapon itself is left untouched for the mod's own logic to use.
+            //
+            // A bow with no arrows never reaches here: hasAmmunition() is false for it.
             return false;
         }
         // A bow or a crossbow fires a real arrow through the weapon's own ballistics, with the

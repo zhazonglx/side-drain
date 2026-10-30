@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "facing=north": { "model": "sidedrain:block/side_drain_plate_aim" },
+    "facing=south": { "model": "sidedrain:block/side_drain_plate_aim" },
+    "facing=east":  { "model": "sidedrain:block/side_drain_plate_aim" },
+    "facing=west":  { "model": "sidedrain:block/side_drain_plate_aim" },
+    "facing=up":    { "model": "sidedrain:block/side_drain_plate_aim" },
+    "facing=down":  { "model": "sidedrain:block/side_drain_plate_aim" }
+  }
+}
